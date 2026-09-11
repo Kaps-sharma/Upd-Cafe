@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from 'next';
-import { Playfair_Display, Inter } from 'next/font/google';
+import { Playfair_Display, Inter, IBM_Plex_Mono } from 'next/font/google';
 import './globals.css';
 
 const playfair = Playfair_Display({
@@ -15,10 +15,17 @@ const inter = Inter({
   display: 'swap',
 });
 
+const plexMono = IBM_Plex_Mono({
+  subsets: ['latin'],
+  variable: '--font-mono',
+  display: 'swap',
+  weight: ['400', '500', '600'],
+});
+
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  themeColor: '#3c2415',
+  themeColor: '#f3efe6',
 };
 
 export const metadata: Metadata = {
@@ -54,7 +61,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${playfair.variable} ${inter.variable}`}>
+    <html lang="en" className={`${playfair.variable} ${inter.variable} ${plexMono.variable}`}>
       <head>
         <script
           type="application/ld+json"

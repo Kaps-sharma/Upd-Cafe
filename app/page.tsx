@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { getAuthMember } from '@/lib/auth';
 import { getStoreSettings } from '@/lib/db';
 import Header from '@/components/Header';
+import Reveal from '@/components/Reveal';
 
 export const dynamic = 'force-dynamic';
 
@@ -88,81 +89,101 @@ export default async function LandingPage() {
             {member ? `Welcome back, ${member.name}.` : 'New here? Sign up and get ₹20 in your wallet.'}
           </p>
         </div>
+        <div className="hero-scroll" aria-hidden="true">
+          <span className="hero-scroll-track" />
+          <span className="hero-scroll-label">Scroll to enter</span>
+        </div>
       </section>
 
       <section className="landing-section">
         <div className="container">
-          <div className="landing-head">
-            <h2>Your neighbourhood spot, reimagined</h2>
-            <p className="subtitle">
-              See the menu, reserve a table, gain wallet, and earn your discount — all from one
-              little cafe in the corner shop.
-            </p>
-          </div>
+          <Reveal>
+            <div className="landing-head">
+              <span className="section-index">01</span>
+              <h2>Your neighbourhood spot, reimagined</h2>
+              <p className="subtitle">
+                See the menu, reserve a table, gain wallet, and earn your discount — all from one
+                little cafe in the corner shop.
+              </p>
+            </div>
+          </Reveal>
 
-          <div className="landing-about">
-            <div className="landing-about-media">
-              <Image src={ABOUT_IMAGE} alt="Fresh food being prepared at Snake Cafe" fill sizes="(max-width: 640px) 100vw, 480px" />
+          <Reveal>
+            <div className="landing-about">
+              <div className="landing-about-media">
+                <Image src={ABOUT_IMAGE} alt="Fresh food being prepared at Snake Cafe" fill sizes="(max-width: 640px) 100vw, 480px" />
+              </div>
+              <div className="landing-about-text">
+                <h3>Treat yourself</h3>
+                <p>
+                  From a quiet morning tea to the famous Venomous Pasta, our menu is made fresh
+                  through the day. Pick your table on the floor plan, add notes, and skip the
+                  counter queues altogether.
+                </p>
+                <p>
+                  Play Quiz, Guess the Number, or Tic Tac Toe to earn up to 200 {currency} a day.
+                  Redeem them at checkout — 100 {currency} wipes ₹1 off your bill. Fancy a snack
+                  before your game? The kitchen has you covered.
+                </p>
+                <Link href="/menu" className="btn btn-primary">
+                  See the full menu
+                </Link>
+              </div>
             </div>
-            <div className="landing-about-text">
-              <h3>Treat yourself</h3>
-              <p>
-                From a quiet morning tea to the famous Venomous Pasta, our menu is made fresh
-                through the day. Pick your table on the floor plan, add notes, and skip the
-                counter queues altogether.
-              </p>
-              <p>
-                Play Quiz, Guess the Number, or Tic Tac Toe to earn up to 200 {currency} a day.
-                Redeem them at checkout — 100 {currency} wipes ₹1 off your bill. Fancy a snack
-                before your game? The kitchen has you covered.
-              </p>
-              <Link href="/menu" className="btn btn-primary">
-                See the full menu
-              </Link>
-            </div>
-          </div>
+          </Reveal>
         </div>
       </section>
 
       <section className="landing-section landing-section-tint">
         <div className="container">
-          <div className="landing-head">
-            <h2>Everything, right here</h2>
-            <p className="subtitle">Three reasons you’ll want to come back.</p>
-          </div>
-          <div className="feature-strip">
-            <div className="card feature-card">
-              <h3>🍴 Fresh on the menu</h3>
-              <p>Drinks, snacks and meals made to order, with prices in rupees on every plate.</p>
+          <Reveal>
+            <div className="landing-head">
+              <span className="section-index">02</span>
+              <h2>Everything, right here</h2>
+              <p className="subtitle">Three reasons you’ll want to come back.</p>
             </div>
-            <div className="card feature-card">
-              <h3>🎮 Games pay real discounts</h3>
-              <p>Three quick games. Win {currency} every day and spend them like cash.</p>
-            </div>
-            <div className="card feature-card">
-              <h3>🪑 Book a table</h3>
-              <p>See the floor plan, pick your seats and time, and walk in to a table that’s ready.</p>
-            </div>
+          </Reveal>
+          <div className="ledger-list">
+            {[
+              { title: '🍴 Fresh on the menu', text: 'Drinks, snacks and meals made to order, with prices in rupees on every plate.' },
+              { title: '🎮 Games pay real discounts', text: 'Three quick games. Win {currency} every day and spend them like cash.' },
+              { title: '🪑 Book a table', text: 'See the floor plan, pick your seats and time, and walk in to a table that’s ready.' },
+            ].map((feature, i) => (
+              <Reveal key={feature.title} delay={i * 90}>
+                <div className="ledger-item">
+                  <span className="ledger-index">0{i + 1}</span>
+                  <h3>{feature.title}</h3>
+                  <p>
+                    {feature.text.replace('{currency}', String(currency))}
+                  </p>
+                </div>
+              </Reveal>
+            ))}
           </div>
         </div>
       </section>
 
       <section className="landing-section">
         <div className="container">
-          <div className="landing-head">
-            <h2>What our regulars say</h2>
-            <p className="subtitle">Unsponsored, unedited, and definitely returning for more.</p>
-          </div>
+          <Reveal>
+            <div className="landing-head">
+              <span className="section-index">03</span>
+              <h2>What our regulars say</h2>
+              <p className="subtitle">Unsponsored, unedited, and definitely returning for more.</p>
+            </div>
+          </Reveal>
           <div className="reviews-grid">
-            {REVIEWS.map((review) => (
-              <div key={review.name} className="card review-card">
-                <div className="stars" aria-label={`${review.rating} out of 5 stars`}>
-                  {'★'.repeat(review.rating)}
-                  <span className="stars-empty">{'★'.repeat(5 - review.rating)}</span>
+            {REVIEWS.map((review, i) => (
+              <Reveal key={review.name} delay={i * 70}>
+                <div className="review-card">
+                  <div className="stars" aria-label={`${review.rating} out of 5 stars`}>
+                    {'★'.repeat(review.rating)}
+                    <span className="stars-empty">{'★'.repeat(5 - review.rating)}</span>
+                  </div>
+                  <p className="review-text">“{review.text}”</p>
+                  <span className="review-name">— {review.name}</span>
                 </div>
-                <p className="review-text">“{review.text}”</p>
-                <span className="review-name">— {review.name}</span>
-              </div>
+              </Reveal>
             ))}
           </div>
         </div>
@@ -170,15 +191,18 @@ export default async function LandingPage() {
 
       <section className="landing-cta">
         <div className="container">
-          <h2>Your table’s waiting.</h2>
-          <p className="landing-hero-sub">
-            Sign up now and we’ll drop ₹20 in your wallet to get you started.
-          </p>
-          <div className="landing-cta-row">
-            <Link href={member ? '/menu' : '/login'} className="btn btn-primary btn-lg">
-              {member ? 'Start your order' : 'Sign up & get ₹20'}
-            </Link>
-          </div>
+          <Reveal>
+            <span className="section-index section-index-center">04</span>
+            <h2>Your table’s waiting.</h2>
+            <p className="landing-hero-sub">
+              Sign up now and we’ll drop ₹20 in your wallet to get you started.
+            </p>
+            <div className="landing-cta-row">
+              <Link href={member ? '/menu' : '/login'} className="btn btn-primary btn-lg">
+                {member ? 'Start your order' : 'Sign up & get ₹20'}
+              </Link>
+            </div>
+          </Reveal>
         </div>
       </section>
 
