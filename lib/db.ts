@@ -1,5 +1,4 @@
 import 'server-only';
-import { DatabaseSync } from 'node:sqlite';
 import { createClient, type Client } from '@libsql/client';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -186,14 +185,33 @@ function resolveDataDir(): string {
 const DATA_DIR = resolveDataDir();
 const DB_PATH = path.join(DATA_DIR, 'snake_cafe.db');
 
-let localDb: DatabaseSync | null = null;
+type LocalDb = InstanceType<typeof import('node:sqlite')['DatabaseSync']>;
 
-function localDatabase(): DatabaseSync {
+let localDb: LocalDb | null = null;
+
+let nodeSqlitePromise: Promise<typeof import('node:sqlite')> | null = null;
+
+function loadNodeSqlite(): Promise<typeof import('node:sqlite')> {
+  if (!nodeSqlitePromise) {
+    nodeSqlitePromise = import('node:sqlite').catch((cause: unknown) => {
+      nodeSqlitePromise = null;
+      throw new Error(
+        'This runtime does not support the built-in Node.js SQLite module (node:sqlite). ' +
+          'Use Node 22.5+ locally, or on the host set DATABASE_URL and TURSO_AUTH_TOKEN to use a Turso database.',
+        { cause }
+      );
+    });
+  }
+  return nodeSqlitePromise;
+}
+
+async function localDatabase(): Promise<LocalDb> {
   if (!localDb) {
+    const mod = await loadNodeSqlite();
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    localDb = new DatabaseSync(DB_PATH);
+    localDb = new mod.DatabaseSync(DB_PATH);
     localDb.exec(SCHEMA_SQL);
     ensureMenuImageColumnSync();
     seedSettingsSync();
@@ -205,34 +223,36 @@ function localDatabase(): DatabaseSync {
   return localDb;
 }
 
-function localRun(sql: string, params: unknown[] = []): StmtResult {
-  const result = localDatabase().prepare(sql).run(...(params as never[]));
+async function localRun(sql: string, params: unknown[] = []): Promise<StmtResult> {
+  const result = (await localDatabase()).prepare(sql).run(...(params as never[]));
   return { lastInsertRowid: Number(result.lastInsertRowid), changes: Number(result.changes) };
 }
 
-function localGet<T = Record<string, unknown>>(sql: string, params: unknown[] = []): T | undefined {
-  return localDatabase().prepare(sql).get(...(params as never[])) as T | undefined;
+async function localGet<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T | undefined> {
+  return (await localDatabase()).prepare(sql).get(...(params as never[])) as T | undefined;
 }
 
-function localAll<T = Record<string, unknown>>(sql: string, params: unknown[] = []): T[] {
-  return localDatabase().prepare(sql).all(...(params as never[])) as T[];
+async function localAll<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
+  return (await localDatabase()).prepare(sql).all(...(params as never[])) as T[];
+}
+
+async function localExec(sql: string): Promise<void> {
+  (await localDatabase()).exec(sql);
 }
 
 // Serialize transactions on the single local connection so concurrent requests
 // can't interleave BEGIN/COMMIT blocks.
 let localTxChain: Promise<unknown> = Promise.resolve();
 
-function localTransaction<T>(work: (tx: Backend) => Promise<T>): Promise<T> {
+async function localTransaction<T>(work: (tx: Backend) => Promise<T>): Promise<T> {
   const run = localTxChain.then(async () => {
-    const db = localDatabase();
+    const db = await localDatabase();
     db.exec('BEGIN');
     const tx: Backend = {
-      exec: async (sql) => {
-        db.exec(sql);
-      },
-      run: async (sql, params = []) => localRun(sql, params),
-      get: async (sql, params = []) => localGet(sql, params),
-      all: async (sql, params = []) => localAll(sql, params),
+      exec: localExec,
+      run: localRun,
+      get: localGet,
+      all: localAll,
       transaction: localTransaction,
     };
     try {
@@ -533,12 +553,10 @@ export function getDb(): Backend {
     };
   }
   return {
-    exec: async (sql) => {
-      localDatabase().exec(sql);
-    },
-    run: async (sql, params = []) => localRun(sql, params),
-    get: async (sql, params = []) => localGet(sql, params),
-    all: async (sql, params = []) => localAll(sql, params),
+    exec: localExec,
+    run: localRun,
+    get: localGet,
+    all: localAll,
     transaction: localTransaction,
   };
 }
@@ -613,6 +631,7 @@ export async function recordGameOutcome(memberId: number, game: string, won: boo
 
 export async function getSetting(key: string): Promise<string | null> {
   if (isRemote()) return getSettingRemote(key);
+  await localDatabase();
   return getSettingSync(key);
 }
 
