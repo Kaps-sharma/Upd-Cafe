@@ -213,6 +213,37 @@ h3 { font-size: 1.05rem; }
   white-space: nowrap;
 }
 
+/* ---------- Mobile menu toggle ---------- */
+.menu-toggle {
+  appearance: none;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 5px;
+  width: 40px;
+  height: 40px;
+  margin-left: auto;
+  padding: 0;
+  flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.menu-toggle:hover { border-color: var(--border-warm); background: var(--surface-warm); }
+.menu-toggle-bar {
+  display: block;
+  width: 18px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.menu-toggle.active .menu-toggle-bar:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+.menu-toggle.active .menu-toggle-bar:nth-child(2) { opacity: 0; }
+.menu-toggle.active .menu-toggle-bar:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
 /* ---------- Wallet / top-up ---------- */
 .wallet-pills {
   display: flex;
@@ -972,8 +1003,43 @@ code {
 
 /* ---------- Responsive ---------- */
 @media (max-width: 640px) {
-  .site-header-inner { height: auto; flex-wrap: wrap; padding: 8px 12px; gap: 6px; }
-  .site-nav { order: 3; width: 100%; }
+  .site-header-inner { flex-wrap: wrap; }
+  .site-menu-header {
+    height: auto;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    gap: 6px;
+    position: relative;
+  }
+  .site-menu-header .site-nav,
+  .site-menu-header .header-user { display: none; }
+  .menu-toggle { display: flex; }
+
+  .site-menu-header.menu-open {
+    height: auto;
+    padding-bottom: 12px;
+    box-shadow: var(--shadow-md);
+    border-bottom: none;
+  }
+  .site-menu-header.menu-open .site-nav {
+    display: flex;
+    order: 2;
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .site-menu-header.menu-open .header-user {
+    display: flex;
+    order: 3;
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 4px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+
   .header-name { display: none; }
   h1 { font-size: 1.5rem; }
   .hero { padding: 1.5rem 1.25rem; }
@@ -1544,4 +1610,61 @@ code {
   .landing-about { grid-template-columns: 1fr; }
   .feature-strip { grid-template-columns: 1fr; }
   .landing-section { padding: 2.5rem 0; }
+}
+
+/* ---------- Small phones & ultra-narrow ---------- */
+@media (max-width: 520px) {
+  .container { padding: 1.1rem 0.9rem 2.6rem; }
+  .site-header-inner { padding-left: 10px; padding-right: 10px; gap: 6px; }
+  .brand { font-size: 1rem; }
+  .header-user { gap: 0.35rem; }
+  .header-balance, .header-money { padding: 3px 8px; font-size: 0.78rem; }
+  .header-name-link { font-size: 0.8rem; }
+
+  .landing-hero { min-height: 56vh; }
+  .landing-hero-content { padding: 2.4rem 1.1rem; }
+  .landing-hero-content h1 { font-size: 1.55rem; }
+  .landing-hero-sub { font-size: 0.95rem; }
+  .landing-cta h2 { font-size: 1.4rem; }
+  .landing-head h2 { font-size: 1.35rem; }
+  .landing-section { padding: 2.1rem 0; }
+  .landing-cta { padding: 2.4rem 0; }
+  .landing-footer { padding: 2rem 0 1.4rem; }
+  .landing-footer-grid { grid-template-columns: 1fr; gap: 1.5rem; }
+  .landing-footer-bottom { flex-direction: column; align-items: flex-start; }
+
+  .auth-card { padding: 1.6rem 1.25rem; }
+  .auth-card h1 { font-size: 1.35rem; }
+  .modal { padding: 1.3rem 1.1rem; }
+
+  .invoice-row { grid-template-columns: 1fr 1fr; gap: 0.4rem; }
+  .cart-bar {
+    width: calc(100% - 1.6rem);
+    justify-content: space-between;
+    border-radius: 14px;
+    padding: 10px 14px;
+  }
+  .table-tile { width: 72px; min-height: 54px; }
+  .table-tile-label { font-size: 0.85rem; }
+  .floor-row { gap: 9px; padding: 10px 0; }
+  .floor-bar { padding-left: 10px; margin-left: 4px; }
+
+  .ttt-board { grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(3, 60px); }
+  .ttt-cell { font-size: 1.55rem; }
+  .option-list { grid-template-columns: 1fr; }
+  .btn-lg { padding: 10px 18px; font-size: 0.95rem; }
+  .page-head-row { flex-direction: column; align-items: stretch; }
+  .page-head-row .balance-pill, .page-head-row .balance-pill-btn { align-self: stretch; }
+
+  h1 { font-size: 1.3rem; }
+  .hero { padding: 1.3rem 1rem; }
+}
+
+@media (max-width: 360px) {
+  .brand-mark { width: 26px; height: 26px; }
+  .nav-link { padding: 6px 7px; font-size: 0.82rem; }
+  .cart-chips { width: 34px; }
+  .table-tile { width: 64px; min-height: 50px; }
+  .table-tile-seats { font-size: 0.66rem; }
+  .booking-form { gap: 0.9rem; }
 }

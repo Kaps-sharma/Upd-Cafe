@@ -31,6 +31,7 @@ export default function Header({
   const [sc, setSc] = useState(member?.sc ?? 0);
   const [cartCount, setCartCount] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
 
@@ -61,6 +62,10 @@ export default function Header({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [member]);
 
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [pathname]);
+
   const navActive = (href: string) => {
     if (href === '/menu') return pathname === '/menu' || pathname === '/cart';
     if (href === '/games') return ['/games', '/quiz', '/guess', '/tictactoe'].includes(pathname);
@@ -80,12 +85,12 @@ export default function Header({
 
   return (
     <header className="site-header" role="banner">
-      <div className="site-header-inner">
+      <div className={`site-header-inner site-menu-header${menuOpen ? ' menu-open' : ''}`}>
         <Link href="/" className="brand" aria-label={`${storeName} home`}>
           <span className="brand-mark" aria-hidden="true">SC</span>
           <span>{storeName}</span>
         </Link>
-        <nav className="site-nav" aria-label="Main navigation">
+        <nav className="site-nav" id="site-nav" aria-label="Main navigation">
           <Link
             href={homeHref}
             className={navActive('/') ? 'nav-link active' : 'nav-link'}
@@ -141,6 +146,17 @@ export default function Header({
             </Link>
           )}
         </div>
+        <button
+          className={`menu-toggle${menuOpen ? ' active' : ''}`}
+          onClick={() => setMenuOpen((v) => !v)}
+          aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+          aria-expanded={menuOpen}
+          aria-controls="site-nav"
+        >
+          <span className="menu-toggle-bar" />
+          <span className="menu-toggle-bar" />
+          <span className="menu-toggle-bar" />
+        </button>
       </div>
     </header>
   );
