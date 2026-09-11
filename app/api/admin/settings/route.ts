@@ -8,7 +8,7 @@ export async function GET() {
   if (!(await isAdminSession())) {
     return NextResponse.json({ error: 'Not authorized.' }, { status: 401 });
   }
-  return NextResponse.json({ settings: getStoreSettings() });
+  return NextResponse.json({ settings: await getStoreSettings() });
 }
 
 export async function PUT(req: NextRequest) {
@@ -35,10 +35,10 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: 'Welcome bonus must be between 0 and 1,000,000.' }, { status: 400 });
   }
 
-  setSetting('store_name', storeName);
-  setSetting('currency_name', currencyName);
-  setSetting('currency_symbol', currencySymbol);
-  setSetting('welcome_bonus', String(welcomeBonus));
+  await setSetting('store_name', storeName);
+  await setSetting('currency_name', currencyName);
+  await setSetting('currency_symbol', currencySymbol);
+  await setSetting('welcome_bonus', String(welcomeBonus));
 
-  return NextResponse.json({ ok: true, settings: getStoreSettings() });
+  return NextResponse.json({ ok: true, settings: await getStoreSettings() });
 }

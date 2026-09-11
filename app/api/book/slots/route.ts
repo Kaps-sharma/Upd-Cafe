@@ -14,5 +14,5 @@ export async function GET(req: NextRequest) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return NextResponse.json({ error: 'Pick a valid date.' }, { status: 400 });
   }
-  return NextResponse.json({ availability: getTableAvailability(date) });
+  return NextResponse.json({ availability: await getTableAvailability(date) });
 }

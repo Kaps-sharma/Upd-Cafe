@@ -20,7 +20,7 @@ export async function PATCH(req: NextRequest) {
   }
 
   try {
-    const updated = updateMemberProfile(member.id, updates);
+    const updated = await updateMemberProfile(member.id, updates);
     if (!updated) throw new MemberProfileError('Member not found.');
     return NextResponse.json({ member: updated });
   } catch (error) {

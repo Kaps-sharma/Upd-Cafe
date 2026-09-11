@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
 
   // Simulated UPI payment: valid UPI ID + amount -> the money is credited.
   try {
-    updateMemberProfile(member.id, { upiId });
+    await updateMemberProfile(member.id, { upiId });
   } catch (error) {
     if (error instanceof MemberProfileError) {
       return NextResponse.json({ error: error.message }, { status: 400 });
@@ -33,6 +33,6 @@ export async function POST(req: NextRequest) {
     throw error;
   }
 
-  const money = addMoney(member.id, Math.round(amount * 100) / 100);
+  const money = await addMoney(member.id, Math.round(amount * 100) / 100);
   return NextResponse.json({ member: { ...member, money, upiId } });
 }

@@ -13,7 +13,7 @@ export async function PUT(req: NextRequest) {
   const current = typeof body?.current === 'string' ? body.current : '';
   const next = typeof body?.new !== 'undefined' ? String(body.new) : '';
 
-  if (!passcodeMatches(current)) {
+  if (!(await passcodeMatches(current))) {
     return NextResponse.json({ error: 'Current passcode is incorrect.' }, { status: 400 });
   }
   if (!next || next.length < 6) {
@@ -23,6 +23,6 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: 'New passcode must be 64 characters or fewer.' }, { status: 400 });
   }
 
-  setAdminPasscode(next);
+  await setAdminPasscode(next);
   return NextResponse.json({ ok: true });
 }

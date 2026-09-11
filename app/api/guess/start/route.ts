@@ -10,7 +10,7 @@ export async function POST() {
     return NextResponse.json({ error: 'Not logged in.' }, { status: 401 });
   }
 
-  const state = getGameState(member.id, 'guess');
+  const state = await getGameState(member.id, 'guess');
   if (!state.allowed) {
     return NextResponse.json(
       { error: `No turns left. Try again in ${retryLabel(state.retryAfterMs)}.`, retryAfterMs: state.retryAfterMs, attemptsLeft: 0, cooldown: true },
@@ -19,8 +19,8 @@ export async function POST() {
   }
 
   const secret = Math.floor(Math.random() * 100) + 1;
-  const session = createGameSession(member.id, 'guess', secret);
-  const settings = getStoreSettings();
+  const session = await createGameSession(member.id, 'guess', secret);
+  const settings = await getStoreSettings();
   return NextResponse.json({
     gameId: session.id,
     attemptsLeft: state.attemptsLeft,

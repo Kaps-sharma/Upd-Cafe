@@ -46,7 +46,7 @@ export const metadata: Metadata = {
 
 export default async function LandingPage() {
   const member = await getAuthMember();
-  const settings = getStoreSettings();
+  const settings = await getStoreSettings();
   const currency = settings.currencySymbol;
 
   return (

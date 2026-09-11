@@ -10,7 +10,7 @@ export async function GET() {
   if (!member) {
     return NextResponse.json({ error: 'Not logged in.' }, { status: 401 });
   }
-  const state = getGameState(member.id, 'quiz');
+  const state = await getGameState(member.id, 'quiz');
   if (!state.allowed) {
     return NextResponse.json(
       { error: `No turns left. Try again in ${retryLabel(state.retryAfterMs)}.`, retryAfterMs: state.retryAfterMs, attemptsLeft: 0, cooldown: true },
@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid quiz answers.' }, { status: 400 });
   }
 
-  const before = getGameState(member.id, 'quiz');
+  const before = await getGameState(member.id, 'quiz');
   if (!before.allowed) {
     return NextResponse.json(
       { error: `No turns left. Try again in ${retryLabel(before.retryAfterMs)}.`, retryAfterMs: before.retryAfterMs, attemptsLeft: 0, cooldown: true },
@@ -40,16 +40,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const settings = getStoreSettings();
+  const settings = await getStoreSettings();
   const { score, total } = gradeQuiz(answers as number[]);
   const passed = score >= QUIZ_PASS_SCORE;
-  const after = recordGameOutcome(member.id, 'quiz', passed);
+  const after = await recordGameOutcome(member.id, 'quiz', passed);
 
   let reward = 0;
   let balance: number | null = null;
   if (passed) {
     reward = randomGameReward();
-    balance = creditReward(member.id, reward);
+    balance = await creditReward(member.id, reward);
   }
 
   return NextResponse.json({

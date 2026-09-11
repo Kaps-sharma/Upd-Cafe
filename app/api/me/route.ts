@@ -9,7 +9,7 @@ export async function GET() {
   if (!member) {
     return NextResponse.json({ error: 'Not logged in.' }, { status: 401 });
   }
-  const settings = getStoreSettings();
+  const settings = await getStoreSettings();
   return NextResponse.json({
     member,
     settings: {

@@ -27,7 +27,7 @@ export async function PUT(
   if (typeof body?.active === 'boolean') data.active = body.active;
 
   try {
-    const updated = updateMenuItem(numericId, data);
+    const updated = await updateMenuItem(numericId, data);
     if (!updated) {
       return NextResponse.json({ error: 'Item not found.' }, { status: 404 });
     }
@@ -54,7 +54,7 @@ export async function DELETE(
     return NextResponse.json({ error: 'Invalid item id.' }, { status: 400 });
   }
 
-  const deleted = deleteMenuItem(numericId);
+  const deleted = await deleteMenuItem(numericId);
   if (!deleted) {
     return NextResponse.json({ error: 'Item not found.' }, { status: 404 });
   }

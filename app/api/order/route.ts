@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   const rawItems = Array.isArray(body?.items) ? body.items : [];
   const items: { name: string; quantity: number }[] = [];
-  const activeNames = new Set(getActiveMenuItems().map((item) => item.name));
+  const activeNames = new Set((await getActiveMenuItems()).map((item) => item.name));
   const scUsed = Number(body?.scUsed ?? 0);
 
   for (const raw of rawItems) {
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = placeOrder(member.id, items, scUsed);
+    const result = await placeOrder(member.id, items, scUsed);
     return NextResponse.json({ ...result, balance: result.newSc });
   } catch (error) {
     if (error instanceof InsufficientBalanceError || error instanceof MenuItemError) {

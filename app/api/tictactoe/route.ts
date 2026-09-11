@@ -10,7 +10,7 @@ export async function GET() {
   if (!member) {
     return NextResponse.json({ error: 'Not logged in.' }, { status: 401 });
   }
-  const state = getGameState(member.id, 'tictactoe');
+  const state = await getGameState(member.id, 'tictactoe');
   return NextResponse.json({
     allowed: state.allowed,
     cooldown: state.cooldown,
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid board.' }, { status: 400 });
   }
 
-  const before = getGameState(member.id, 'tictactoe');
+  const before = await getGameState(member.id, 'tictactoe');
   if (!before.allowed) {
     return NextResponse.json(
       { error: `No turns left. Try again later.`, retryAfterMs: before.retryAfterMs, attemptsLeft: 0, cooldown: true },
@@ -47,9 +47,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const settings = getStoreSettings();
+  const settings = await getStoreSettings();
   if (outcome !== 'win') {
-    const after = recordGameOutcome(member.id, 'tictactoe', false);
+    const after = await recordGameOutcome(member.id, 'tictactoe', false);
     return NextResponse.json({
       outcome,
       attemptsLeft: after.attemptsLeft,
@@ -60,8 +60,8 @@ export async function POST(req: NextRequest) {
   }
 
   const reward = randomGameReward();
-  const balance = creditReward(member.id, reward);
-  const after = recordGameOutcome(member.id, 'tictactoe', true);
+  const balance = await creditReward(member.id, reward);
+  const after = await recordGameOutcome(member.id, 'tictactoe', true);
   return NextResponse.json({
     outcome,
     reward,

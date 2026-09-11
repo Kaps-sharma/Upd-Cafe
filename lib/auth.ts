@@ -57,7 +57,7 @@ export async function clearSession(): Promise<void> {
 export async function requireMember(): Promise<MemberPublic> {
   const id = await getMemberId();
   if (id == null) redirect('/login');
-  const member = getMember(id);
+  const member = await getMember(id);
   if (!member) redirect('/login');
   return member;
 }
@@ -65,7 +65,7 @@ export async function requireMember(): Promise<MemberPublic> {
 export async function getAuthMember(): Promise<MemberPublic | null> {
   const id = await getMemberId();
   if (id == null) return null;
-  return getMember(id);
+  return await getMember(id);
 }
 
 export async function setAdminSession(): Promise<void> {

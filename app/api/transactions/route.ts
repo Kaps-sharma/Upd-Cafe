@@ -9,6 +9,6 @@ export async function GET() {
   if (!member) {
     return NextResponse.json({ error: 'Not logged in.' }, { status: 401 });
   }
-  const settings = getStoreSettings();
-  return NextResponse.json({ invoices: getTransactions(member.id), currencySymbol: settings.currencySymbol });
+  const settings = await getStoreSettings();
+  return NextResponse.json({ invoices: await getTransactions(member.id), currencySymbol: settings.currencySymbol });
 }

@@ -8,7 +8,7 @@ export async function GET() {
   if (!(await isAdminSession())) {
     return NextResponse.json({ error: 'Not authorized.' }, { status: 401 });
   }
-  return NextResponse.json({ items: listMenuItems() });
+  return NextResponse.json({ items: await listMenuItems() });
 }
 
 export async function POST(req: NextRequest) {
@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
   const image = typeof body?.image === 'string' ? body.image : '';
 
   try {
-    const item = createMenuItem({ name, price, category, image });
+    const item = await createMenuItem({ name, price, category, image });
     return NextResponse.json({ item });
   } catch (error) {
     if (error instanceof MenuItemError) {

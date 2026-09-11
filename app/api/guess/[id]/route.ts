@@ -22,7 +22,7 @@ export async function POST(
   }
 
   const { id } = await ctx.params;
-  const session = getGameSession(Number(id));
+  const session = await getGameSession(Number(id));
   if (!session || session.member_id !== member.id || session.game !== 'guess') {
     return NextResponse.json({ error: 'Game not found.' }, { status: 404 });
   }
@@ -39,14 +39,14 @@ export async function POST(
     );
   }
 
-  const settings = getStoreSettings();
+  const settings = await getStoreSettings();
   const moves = session.moves + 1;
 
   if (guess === session.secret) {
-    finishGameSession(session.id, 'won');
+    await finishGameSession(session.id, 'won');
     const reward = randomGameReward();
-    const balance = creditReward(member.id, reward);
-    const state = recordGameOutcome(member.id, 'guess', true);
+    const balance = await creditReward(member.id, reward);
+    const state = await recordGameOutcome(member.id, 'guess', true);
     return NextResponse.json({
       result: 'win',
       moves,
@@ -60,8 +60,8 @@ export async function POST(
   }
 
   if (moves >= 10) {
-    finishGameSession(session.id, 'lost');
-    const state = recordGameOutcome(member.id, 'guess', false);
+    await finishGameSession(session.id, 'lost');
+    const state = await recordGameOutcome(member.id, 'guess', false);
     return NextResponse.json({
       result: 'lose',
       moves,
@@ -72,7 +72,7 @@ export async function POST(
     });
   }
 
-  updateSessionMoves(session.id, moves);
+  await updateSessionMoves(session.id, moves);
   const low = guess < (session.secret as number);
   return NextResponse.json({
     result: low ? 'low' : 'high',

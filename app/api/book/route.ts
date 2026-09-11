@@ -9,7 +9,7 @@ export async function GET() {
   if (!member) {
     return NextResponse.json({ error: 'Not logged in.' }, { status: 401 });
   }
-  return NextResponse.json({ bookings: getMemberBookings(member.id) });
+  return NextResponse.json({ bookings: await getMemberBookings(member.id) });
 }
 
 export async function POST(req: NextRequest) {
@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json().catch(() => null);
   try {
-    const booking = createBooking(member.id, member.name, {
+    const booking = await createBooking(member.id, member.name, {
       date: body?.date,
       slot: body?.slot,
       table: body?.table,

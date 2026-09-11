@@ -14,8 +14,8 @@ export const metadata: Metadata = {
 
 export default async function MenuPage() {
   const member = await requireMember();
-  const settings = getStoreSettings();
-  const items = getActiveMenuItems();
+  const settings = await getStoreSettings();
+  const items = await getActiveMenuItems();
 
   return (
     <main>

@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 };
 
 export default async function AdminLoginPage() {
-  const settings = getStoreSettings();
+  const settings = await getStoreSettings();
   return (
     <main className="auth-wrap">
       <div className="auth-card">

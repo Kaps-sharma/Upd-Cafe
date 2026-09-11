@@ -18,8 +18,8 @@ export default async function AdminPage() {
     redirect('/admin/login');
   }
 
-  const settings = getStoreSettings();
-  const items = listMenuItems();
+  const settings = await getStoreSettings();
+  const items = await listMenuItems();
 
   return (
     <main>

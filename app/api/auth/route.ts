@@ -16,11 +16,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Name is too long (maximum 40 characters).' }, { status: 400 });
   }
 
-  const settings = getStoreSettings();
-  let member = findMemberByName(name);
+  const settings = await getStoreSettings();
+  let member = await findMemberByName(name);
   let created = false;
   if (!member) {
-    member = createMember(name, settings.welcomeBonus);
+    member = await createMember(name, settings.welcomeBonus);
     created = true;
   }
 

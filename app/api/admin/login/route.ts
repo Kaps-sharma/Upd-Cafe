@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
   if (!passcode) {
     return NextResponse.json({ error: 'Please enter the admin passcode.' }, { status: 400 });
   }
-  if (!passcodeMatches(passcode)) {
+  if (!(await passcodeMatches(passcode))) {
     return NextResponse.json({ error: 'Incorrect passcode.' }, { status: 401 });
   }
   await setAdminSession();

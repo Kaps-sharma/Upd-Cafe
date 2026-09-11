@@ -13,8 +13,8 @@ export const metadata: Metadata = {
 
 export default async function CartPage() {
   const member = await requireMember();
-  const settings = getStoreSettings();
-  const items = listMenuItems();
+  const settings = await getStoreSettings();
+  const items = await listMenuItems();
 
   return (
     <main>

@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 
 export default async function ProfilePage() {
   const member = await requireMember();
-  const settings = getStoreSettings();
+  const settings = await getStoreSettings();
 
   return (
     <main>
