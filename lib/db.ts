@@ -1,5 +1,5 @@
 import 'server-only';
-import { createClient, type Client } from '@libsql/client';
+import { Pool, type QueryResult, type PoolClient } from 'pg';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -67,7 +67,7 @@ export class BookingError extends Error {}
 // ---------------------------------------------------------------------------
 // Engine abstraction: two backends with the same async API.
 // - Local: SQLite file via node:sqlite (used on dev/machines with a disk).
-// - Remote: Turso / libSQL via @libsql/client (used on serverless hosts).
+// - Remote: PostgreSQL via node-postgres (used on serverless hosts).
 // ---------------------------------------------------------------------------
 
 interface StmtResult {
@@ -167,7 +167,78 @@ const SCHEMA_SQL = `
   );
 `;
 
-const SCHEMA_STATEMENTS = SCHEMA_SQL.split(';').map((s) => s.trim()).filter((s) => s.length > 0);
+// ----------------------- PostgreSQL (Supabase) schema -----------------------
+
+const PG_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS Members (
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    balance DOUBLE PRECISION NOT NULL DEFAULT 0,
+    money DOUBLE PRECISION NOT NULL DEFAULT 0,
+    phone TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL DEFAULT '',
+    upi_id TEXT NOT NULL DEFAULT ''
+  );
+
+  CREATE TABLE IF NOT EXISTS GameLimits (
+    member_id INTEGER NOT NULL,
+    game TEXT NOT NULL,
+    plays INTEGER NOT NULL DEFAULT 0,
+    cooldown_until BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (member_id, game),
+    FOREIGN KEY(member_id) REFERENCES Members(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS Transactions (
+    id SERIAL PRIMARY KEY,
+    member_id INTEGER NOT NULL,
+    order_details TEXT NOT NULL,
+    total DOUBLE PRECISION NOT NULL,
+    sc_used DOUBLE PRECISION NOT NULL DEFAULT 0,
+    items_json TEXT NOT NULL DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY(member_id) REFERENCES Members(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS GameSessions (
+    id SERIAL PRIMARY KEY,
+    member_id INTEGER NOT NULL,
+    game TEXT NOT NULL,
+    secret INTEGER,
+    moves INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY(member_id) REFERENCES Members(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS Bookings (
+    id SERIAL PRIMARY KEY,
+    member_id INTEGER NOT NULL,
+    table_number TEXT NOT NULL,
+    table_label TEXT NOT NULL,
+    capacity INTEGER NOT NULL,
+    seats INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    slot_id TEXT NOT NULL,
+    slot_label TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY(member_id) REFERENCES Members(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS Settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS MenuItems (
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    price DOUBLE PRECISION NOT NULL,
+    category TEXT NOT NULL DEFAULT 'General',
+    image TEXT NOT NULL DEFAULT '',
+    active SMALLINT NOT NULL DEFAULT 1
+  );
+`;
 
 // ----------------------------- Local backend ------------------------------
 
@@ -271,186 +342,227 @@ async function localTransaction<T>(work: (tx: Backend) => Promise<T>): Promise<T
   return run;
 }
 
-// ----------------------------- Remote (Turso) ------------------------------
+// ----------------------- Remote (Supabase / PostgreSQL) --------------------
 
 function isRemote(): boolean {
   const url = process.env.DATABASE_URL;
-  return typeof url === 'string' && url.length > 0 && /^(https?|libsql):\/\//.test(url);
+  return typeof url === 'string' && url.length > 0 && /^(postgres|postgresql):\/\//.test(url);
 }
 
-let remoteClient: Client | null = null;
-let remoteInit: Promise<void> | null = null;
+let pgPool: Pool | null = null;
+let pgInit: Promise<void> | null = null;
 
-function getRemoteClient(): Client {
-  if (!remoteClient) {
-    remoteClient = createClient({
-      url: process.env.DATABASE_URL as string,
-      authToken: process.env.TURSO_AUTH_TOKEN || undefined,
+function getPool(): Pool {
+  if (!pgPool) {
+    pgPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 4,
+      ssl: { rejectUnauthorized: false },
     });
   }
-  return remoteClient;
+  return pgPool;
 }
 
-async function ensureRemoteReady(): Promise<void> {
-  if (!remoteInit) {
-    remoteInit = initRemote();
+// node-postgres uses $1..$n placeholders; our SQL uses SQLite-style `?`.
+function toPgQuery(sql: string, params: unknown[]): { text: string; values: unknown[] } {
+  if (params.length === 0) return { text: sql, values: [] };
+  let index = 0;
+  const text = sql.replace(/\?/g, () => `$${++index}`);
+  return { text, values: params };
+}
+
+async function pgQuery(
+  source: Pool | PoolClient,
+  text: string,
+  values: unknown[] = []
+): Promise<QueryResult> {
+  // With no bound params use the simple query protocol so multi-statement SQL works.
+  return values.length === 0
+    ? source.query(text)
+    : source.query(text, values as never[]);
+}
+
+async function ensurePgReady(): Promise<void> {
+  if (!pgInit) {
+    pgInit = initPg();
   }
-  await remoteInit;
+  await pgInit;
 }
 
-function rowsFromResultSet(rs: Awaited<ReturnType<Client['execute']>>): Record<string, unknown>[] {
-  return rs.rows.map((row) => {
-    const obj: Record<string, unknown> = {};
-    rs.columns.forEach((col, i) => {
-      obj[col] = row[i];
-    });
-    return obj;
-  });
+async function initPg(): Promise<void> {
+  const pool = getPool();
+  await pgQuery(pool, PG_SCHEMA_SQL);
+  await ensurePgMenuImageColumn(pool);
+  await seedPgSettings(pool);
+  await ensurePgMoneyColumn(pool);
+  await ensurePgProfileColumns(pool);
+  await ensurePgInvoiceColumns(pool);
+  await seedPgMenu(pool);
 }
 
-async function remoteRun(sql: string, params: unknown[] = []): Promise<StmtResult> {
-  await ensureRemoteReady();
-  const rs = await getRemoteClient().execute({ sql, args: params as never[] });
-  return { lastInsertRowid: Number(rs.lastInsertRowid ?? 0), changes: rs.rowsAffected };
+async function pgTableColumns(pool: Pool, table: string): Promise<string[]> {
+  const res = await pgQuery(
+    pool,
+    'SELECT column_name FROM information_schema.columns WHERE table_name = lower($1)',
+    [table]
+  );
+  return res.rows.map((r) => String((r as { column_name: unknown }).column_name));
 }
 
-async function remoteGet<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T | undefined> {
-  await ensureRemoteReady();
-  const rs = await getRemoteClient().execute({ sql, args: params as never[] });
-  const rows = rowsFromResultSet(rs);
-  return rows[0] as T | undefined;
+async function pgExec(sql: string): Promise<void> {
+  await ensurePgReady();
+  await pgQuery(getPool(), sql);
 }
 
-async function remoteAll<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
-  await ensureRemoteReady();
-  const rs = await getRemoteClient().execute({ sql, args: params as never[] });
-  return rowsFromResultSet(rs) as T[];
-}
-
-async function remoteTransaction<T>(work: (tx: Backend) => Promise<T>): Promise<T> {
-  await ensureRemoteReady();
-  const tx = await getRemoteClient().transaction();
-  const adapter: Backend = {
-    exec: async (sql) => {
-      await tx.execute({ sql });
-    },
-    run: async (sql, params = []) => {
-      const rs = await tx.execute({ sql, args: params as never[] });
-      return { lastInsertRowid: Number(rs.lastInsertRowid ?? 0), changes: rs.rowsAffected };
-    },
-    get: async <T2 = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
-      const rs = await tx.execute({ sql, args: params as never[] });
-      return rowsFromResultSet(rs)[0] as T2 | undefined;
-    },
-    all: async <T2 = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
-      const rs = await tx.execute({ sql, args: params as never[] });
-      return rowsFromResultSet(rs) as T2[];
-    },
-    transaction: remoteTransaction,
+async function pgRun(sql: string, params: unknown[] = []): Promise<StmtResult> {
+  await ensurePgReady();
+  const q = toPgQuery(sql, params);
+  const queryText =
+    /^\s*INSERT/i.test(q.text) && !/RETURNING/i.test(q.text)
+      ? `${q.text} RETURNING id`
+      : q.text;
+  const res = await pgQuery(getPool(), queryText, q.values);
+  const first = res.rows[0] as { id?: number | bigint } | undefined;
+  return {
+    lastInsertRowid: first && first.id !== undefined ? Number(first.id) : 0,
+    changes: res.rowCount ?? 0,
   };
+}
+
+async function pgGet<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T | undefined> {
+  await ensurePgReady();
+  const q = toPgQuery(sql, params);
+  const res = await pgQuery(getPool(), q.text, q.values);
+  return res.rows[0] as T | undefined;
+}
+
+async function pgAll<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
+  await ensurePgReady();
+  const q = toPgQuery(sql, params);
+  const res = await pgQuery(getPool(), q.text, q.values);
+  return res.rows as T[];
+}
+
+async function pgTransaction<T>(work: (tx: Backend) => Promise<T>): Promise<T> {
+  await ensurePgReady();
+  const client = await getPool().connect();
   try {
+    await client.query('BEGIN');
+    const adapter: Backend = {
+      exec: async (sql) => {
+        await pgQuery(client, sql);
+      },
+      run: async (sql, params = []) => {
+        const q = toPgQuery(sql, params);
+        const queryText =
+          /^\s*INSERT/i.test(q.text) && !/RETURNING/i.test(q.text)
+            ? `${q.text} RETURNING id`
+            : q.text;
+        const res = await pgQuery(client, queryText, q.values);
+        const first = res.rows[0] as { id?: number | bigint } | undefined;
+        return {
+          lastInsertRowid: first && first.id !== undefined ? Number(first.id) : 0,
+          changes: res.rowCount ?? 0,
+        };
+      },
+      get: async <T2 = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
+        const q = toPgQuery(sql, params);
+        const res = await pgQuery(client, q.text, q.values);
+        return res.rows[0] as T2 | undefined;
+      },
+      all: async <T2 = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
+        const q = toPgQuery(sql, params);
+        const res = await pgQuery(client, q.text, q.values);
+        return res.rows as T2[];
+      },
+      transaction: pgTransaction,
+    };
     const result = await work(adapter);
-    await tx.commit();
+    await client.query('COMMIT');
     return result;
   } catch (error) {
-    await tx.rollback().catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined);
     throw error;
+  } finally {
+    client.release();
   }
 }
 
-async function initRemote(): Promise<void> {
-  const client = getRemoteClient();
-  await client.batch(SCHEMA_STATEMENTS.map((sql) => ({ sql })));
-  await ensureMenuImageColumnRemote();
-  await seedSettingsRemote();
-  await ensureMoneyColumnRemote();
-  await ensureProfileColumnsRemote();
-  await ensureInvoiceColumnsRemote();
-  await seedMenuRemote();
-}
-
-async function tableColumnsRemote(table: string): Promise<string[]> {
-  const rs = await getRemoteClient().execute({ sql: `PRAGMA table_info(${table})` });
-  return rowsFromResultSet(rs).map((r) => String(r.name));
-}
-
-async function ensureMenuImageColumnRemote(): Promise<void> {
-  const columns = await tableColumnsRemote('MenuItems');
+async function ensurePgMenuImageColumn(pool: Pool): Promise<void> {
+  const columns = await pgTableColumns(pool, 'MenuItems');
   if (!columns.includes('image')) {
-    await getRemoteClient().execute({ sql: `ALTER TABLE MenuItems ADD COLUMN image TEXT NOT NULL DEFAULT ''` });
+    await pgQuery(pool, `ALTER TABLE MenuItems ADD COLUMN image TEXT NOT NULL DEFAULT ''`);
   }
   for (const item of MENU_SEED) {
     if (item.image) {
-      await getRemoteClient().execute({
-        sql: `UPDATE MenuItems SET image = ? WHERE name = ? AND (image IS NULL OR image = '')`,
-        args: [item.image, item.name],
-      });
+      await pgQuery(
+        pool,
+        `UPDATE MenuItems SET image = $1 WHERE name = $2 AND (image IS NULL OR image = '')`,
+        [item.image, item.name]
+      );
     }
   }
 }
 
-async function ensureMoneyColumnRemote(): Promise<void> {
-  const columns = await tableColumnsRemote('Members');
-  if (!columns.includes('money')) {
-    await getRemoteClient().execute({ sql: `ALTER TABLE Members ADD COLUMN money REAL NOT NULL DEFAULT 0` });
-  }
-  const welcome = (await getSettingRemote('welcome_bonus')) ?? SETTING_DEFAULTS.welcome_bonus;
-  await getRemoteClient().execute({
-    sql: `UPDATE Members SET money = ? WHERE money IS NULL OR money = 0`,
-    args: [Number(welcome)],
-  });
-}
-
-async function ensureProfileColumnsRemote(): Promise<void> {
-  const columns = await tableColumnsRemote('Members');
-  for (const col of ['phone', 'address', 'upi_id'] as const) {
-    if (!columns.includes(col)) {
-      await getRemoteClient().execute({ sql: `ALTER TABLE Members ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''` });
-    }
-  }
-}
-
-async function ensureInvoiceColumnsRemote(): Promise<void> {
-  const columns = await tableColumnsRemote('Transactions');
-  if (!columns.includes('sc_used')) {
-    await getRemoteClient().execute({ sql: `ALTER TABLE Transactions ADD COLUMN sc_used REAL NOT NULL DEFAULT 0` });
-  }
-  if (!columns.includes('items_json')) {
-    await getRemoteClient().execute({ sql: `ALTER TABLE Transactions ADD COLUMN items_json TEXT NOT NULL DEFAULT '[]'` });
-  }
-}
-
-async function seedSettingsRemote(): Promise<void> {
+async function seedPgSettings(pool: Pool): Promise<void> {
   const defaultPasscode = process.env.SNAKE_CAFE_ADMIN_PASSCODE ?? 'admin123';
-  const existing = new Set(
-    (await remoteAll<{ key: string }>('SELECT key FROM Settings')).map((r) => r.key)
-  );
   const defaults: Record<string, string> = {
     ...SETTING_DEFAULTS,
     admin_passcode_hash: hashPasscode(defaultPasscode),
   };
   for (const [key, value] of Object.entries(defaults)) {
-    if (!existing.has(key)) {
-      await remoteRun('INSERT OR IGNORE INTO Settings (key, value) VALUES (?, ?)', [key, value]);
-    }
-  }
-}
-
-async function seedMenuRemote(): Promise<void> {
-  const row = await remoteGet<{ n: number }>('SELECT COUNT(*) AS n FROM MenuItems');
-  if ((row?.n ?? 0) > 0) return;
-  for (const item of MENU_SEED) {
-    await remoteRun('INSERT INTO MenuItems (name, price, category, image, active) VALUES (?, ?, ?, ?, 1)', [
-      item.name,
-      item.price,
-      item.category,
-      item.image,
+    await pgQuery(pool, 'INSERT INTO Settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [
+      key,
+      value,
     ]);
   }
 }
 
-async function getSettingRemote(key: string): Promise<string | null> {
-  const row = await remoteGet<{ value: string }>('SELECT value FROM Settings WHERE key = ?', [key]);
+async function ensurePgMoneyColumn(pool: Pool): Promise<void> {
+  const columns = await pgTableColumns(pool, 'Members');
+  if (!columns.includes('money')) {
+    await pgQuery(pool, `ALTER TABLE Members ADD COLUMN money DOUBLE PRECISION NOT NULL DEFAULT 0`);
+  }
+  const row = await pgQuery(pool, 'SELECT value FROM Settings WHERE key = $1', ['welcome_bonus']);
+  const welcome =
+    (row.rows[0] as { value?: string } | undefined)?.value ?? SETTING_DEFAULTS.welcome_bonus;
+  await pgQuery(pool, 'UPDATE Members SET money = $1 WHERE money IS NULL OR money = 0', [Number(welcome)]);
+}
+
+async function ensurePgProfileColumns(pool: Pool): Promise<void> {
+  const columns = await pgTableColumns(pool, 'Members');
+  for (const col of ['phone', 'address', 'upi_id'] as const) {
+    if (!columns.includes(col)) {
+      await pgQuery(pool, `ALTER TABLE Members ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
+    }
+  }
+}
+
+async function ensurePgInvoiceColumns(pool: Pool): Promise<void> {
+  const columns = await pgTableColumns(pool, 'Transactions');
+  if (!columns.includes('sc_used')) {
+    await pgQuery(pool, `ALTER TABLE Transactions ADD COLUMN sc_used DOUBLE PRECISION NOT NULL DEFAULT 0`);
+  }
+  if (!columns.includes('items_json')) {
+    await pgQuery(pool, `ALTER TABLE Transactions ADD COLUMN items_json TEXT NOT NULL DEFAULT '[]'`);
+  }
+}
+
+async function seedPgMenu(pool: Pool): Promise<void> {
+  const res = await pgQuery(pool, 'SELECT COUNT(*) AS n FROM MenuItems');
+  const n = (res.rows[0] as { n?: unknown } | undefined)?.n;
+  if (Number(n ?? 0) > 0) return;
+  for (const item of MENU_SEED) {
+    await pgQuery(
+      pool,
+      'INSERT INTO MenuItems (name, price, category, image) VALUES ($1, $2, $3, $4)',
+      [item.name, item.price, item.category, item.image]
+    );
+  }
+}
+
+async function getPgSetting(key: string): Promise<string | null> {
+  const row = await pgGet<{ value: string }>('SELECT value FROM Settings WHERE key = ?', [key]);
   return row?.value ?? null;
 }
 
@@ -542,14 +654,11 @@ function getSettingSync(key: string): string | null {
 export function getDb(): Backend {
   if (isRemote()) {
     return {
-      exec: async (sql) => {
-        await ensureRemoteReady();
-        await getRemoteClient().execute({ sql });
-      },
-      run: remoteRun,
-      get: remoteGet,
-      all: remoteAll,
-      transaction: remoteTransaction,
+      exec: pgExec,
+      run: pgRun,
+      get: pgGet,
+      all: pgAll,
+      transaction: pgTransaction,
     };
   }
   return {
@@ -575,7 +684,7 @@ async function readGameLimit(memberId: number, game: string): Promise<{ plays: n
     'SELECT plays, cooldown_until FROM GameLimits WHERE member_id = ? AND game = ?',
     [memberId, game]
   );
-  return { plays: row?.plays ?? 0, cooldown_until: row?.cooldown_until ?? 0 };
+  return { plays: row?.plays ?? 0, cooldown_until: Number(row?.cooldown_until ?? 0) };
 }
 
 async function writeGameLimit(memberId: number, game: string, plays: number, cooldownUntil: number): Promise<void> {
@@ -630,7 +739,7 @@ export async function recordGameOutcome(memberId: number, game: string, won: boo
 // ---- Settings ----
 
 export async function getSetting(key: string): Promise<string | null> {
-  if (isRemote()) return getSettingRemote(key);
+  if (isRemote()) return getPgSetting(key);
   await localDatabase();
   return getSettingSync(key);
 }
@@ -882,7 +991,7 @@ export async function getTransactions(memberId: number): Promise<Invoice[]> {
     }
     return {
       id: r.id,
-      timestamp: r.timestamp,
+      timestamp: fmtTs(r.timestamp),
       orderDetails: r.order_details,
       total: r.total,
       scUsed: r.sc_used ?? 0,
@@ -925,6 +1034,16 @@ type BookingRow = {
   created_at: string;
 };
 
+function fmtTs(value: unknown): string {
+  if (value instanceof Date) {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(
+      value.getHours()
+    )}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
+  }
+  return String(value ?? '');
+}
+
 function rowToBooking(row: BookingRow): BookingInvoice {
   return {
     id: row.id,
@@ -937,7 +1056,7 @@ function rowToBooking(row: BookingRow): BookingInvoice {
     slotId: row.slot_id,
     slotLabel: row.slot_label,
     memberName: row.member_name,
-    timestamp: row.created_at,
+    timestamp: fmtTs(row.created_at),
   };
 }
 

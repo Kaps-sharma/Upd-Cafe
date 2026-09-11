@@ -1,9 +1,8 @@
 import 'server-only';
 import { cookies } from 'next/headers';
-import { redirect } from 'next/navigation';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { MemberPublic } from '@/lib/store';
-import { getMember } from '@/lib/db';
+import { getMember, findMemberByName, createMember, getStoreSettings } from '@/lib/db';
 
 const SESSION_COOKIE = 'snake_session';
 const ADMIN_COOKIE = 'snake_admin';
@@ -54,18 +53,30 @@ export async function clearSession(): Promise<void> {
   store.delete(SESSION_COOKIE);
 }
 
+const GUEST_NAME = 'Guest';
+
+// Login is optional during demo mode: requests always resolve to a member.
+// A signed-in session uses that member; otherwise a shared "Guest" member is
+// used automatically so every page and API works without an account.
+async function resolveMember(id: number | null): Promise<MemberPublic> {
+  if (id != null) {
+    const member = await getMember(id);
+    if (member) return member;
+  }
+  let guest = await findMemberByName(GUEST_NAME);
+  if (!guest) {
+    const settings = await getStoreSettings();
+    guest = await createMember(GUEST_NAME, settings.welcomeBonus);
+  }
+  return guest;
+}
+
 export async function requireMember(): Promise<MemberPublic> {
-  const id = await getMemberId();
-  if (id == null) redirect('/login');
-  const member = await getMember(id);
-  if (!member) redirect('/login');
-  return member;
+  return resolveMember(await getMemberId());
 }
 
 export async function getAuthMember(): Promise<MemberPublic | null> {
-  const id = await getMemberId();
-  if (id == null) return null;
-  return await getMember(id);
+  return resolveMember(await getMemberId());
 }
 
 export async function setAdminSession(): Promise<void> {
