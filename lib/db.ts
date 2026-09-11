@@ -1,6 +1,7 @@
 import 'server-only';
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { MENU_SEED } from '@/lib/menu';
@@ -63,7 +64,18 @@ export class MemberProfileError extends Error {}
 
 export class BookingError extends Error {}
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+function resolveDataDir(): string {
+  const cwdDir = path.join(process.cwd(), 'data');
+  try {
+    fs.mkdirSync(cwdDir, { recursive: true });
+    fs.accessSync(cwdDir, fs.constants.W_OK);
+    return cwdDir;
+  } catch {
+    return path.join(os.tmpdir(), 'snake_cafe_data');
+  }
+}
+
+const DATA_DIR = resolveDataDir();
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
