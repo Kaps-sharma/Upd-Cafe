@@ -1,0 +1,19 @@
+# Dependencies
+/node_modules
+
+# Next.js build output
+/.next
+/out
+
+# Database files (created at runtime in data/)
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
+/data/*.db-shm
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env*.local
