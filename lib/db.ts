@@ -1,31 +1,39 @@
 import 'server-only';
-import { Pool, type QueryResult, type PoolClient } from 'pg';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { Pool, types, type PoolClient } from 'pg';
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { MENU_SEED } from '@/lib/menu';
 import { MAX_GAME_TURNS, GAME_COOLDOWN_MS } from '@/lib/games';
 import { SC_PER_RUPEE } from '@/lib/store';
+import {
+  DEFAULT_TIME_ZONE,
+  addDaysToDateKey,
+  dateKeyInZone,
+  isValidDateKey,
+  isValidTimeZone,
+  timeKeyInZone,
+} from '@/lib/time';
 import { TABLES, TIME_SLOTS, SLOT_STARTS, MAX_SEATS, MAX_BOOKING_DAYS } from '@/lib/tables';
 import type { MemberPublic, StoreSettings, MenuItem } from '@/lib/store';
+import {
+  ORDER_STATUS_LABEL,
+  canTransition,
+  isOrderStatus,
+  isOrderType,
+  orderNo,
+  type Order,
+  type OrderLine,
+  type OrderStatus,
+  type OrderType,
+} from '@/lib/orders';
+
+// Postgres sends NUMERIC and BIGINT as strings so nothing is silently rounded.
+// We want plain JS numbers for money maths, so convert them on the way in.
+types.setTypeParser(1700, (v) => (v === null ? null : Number(v))); // NUMERIC
+types.setTypeParser(20, (v) => (v === null ? null : Number(v))); // BIGINT
 
 export type Member = MemberPublic;
 
-export interface InvoiceItem {
-  name: string;
-  price: number;
-  quantity: number;
-}
-
-export interface Invoice {
-  id: number;
-  timestamp: string;
-  orderDetails: string;
-  total: number;
-  scUsed: number;
-  items: InvoiceItem[] | null;
-}
+export type { Order, OrderLine, OrderStatus, OrderType };
 
 export interface BookingInvoice {
   id: number;
@@ -38,6 +46,7 @@ export interface BookingInvoice {
   slotId: string;
   slotLabel: string;
   memberName: string;
+  status: string;
   timestamp: string;
 }
 
@@ -46,6 +55,7 @@ export interface GameSession {
   member_id: number;
   game: string;
   secret: number | null;
+  board: string;
   moves: number;
   status: string;
 }
@@ -62,422 +72,84 @@ export class MenuItemError extends Error {}
 
 export class MemberProfileError extends Error {}
 
+export class AdminError extends Error {}
+
 export class BookingError extends Error {}
 
+export class OrderError extends Error {}
+
 // ---------------------------------------------------------------------------
-// Engine abstraction: two backends with the same async API.
-// - Local: SQLite file via node:sqlite (used on dev/machines with a disk).
-// - Remote: PostgreSQL via node-postgres (used on serverless hosts).
+// Connection
 // ---------------------------------------------------------------------------
 
-interface StmtResult {
-  lastInsertRowid: number | bigint;
-  changes: number;
-}
+let pool: Pool | null = null;
 
-interface Backend {
-  exec(sql: string): Promise<void>;
-  run(sql: string, params?: unknown[]): Promise<StmtResult>;
-  get<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | undefined>;
-  all<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
-  transaction<T>(work: (tx: Backend) => Promise<T>): Promise<T>;
-}
-
-const SETTING_DEFAULTS: Record<string, string> = {
-  store_name: 'Snake Cafe',
-  currency_name: 'Snake Coins',
-  currency_symbol: 'SC',
-  welcome_bonus: '20',
-};
-
-const PASSSCODE_SECRET = process.env.SNAKE_CAFE_SECRET ?? 'snake-cafe-dev-secret-change-me';
-
-export function hashPasscode(passcode: string): string {
-  return createHash('sha256').update(`${PASSSCODE_SECRET}::${passcode}`).digest('hex');
-}
-
-const SCHEMA_SQL = `
-  CREATE TABLE IF NOT EXISTS Members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    balance REAL NOT NULL DEFAULT 0,
-    money REAL NOT NULL DEFAULT 0,
-    phone TEXT NOT NULL DEFAULT '',
-    address TEXT NOT NULL DEFAULT '',
-    upi_id TEXT NOT NULL DEFAULT ''
-  );
-
-  CREATE TABLE IF NOT EXISTS GameLimits (
-    member_id INTEGER NOT NULL,
-    game TEXT NOT NULL,
-    plays INTEGER NOT NULL DEFAULT 0,
-    cooldown_until INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (member_id, game),
-    FOREIGN KEY(member_id) REFERENCES Members(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS Transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    member_id INTEGER NOT NULL,
-    order_details TEXT NOT NULL,
-    total REAL NOT NULL,
-    sc_used REAL NOT NULL DEFAULT 0,
-    items_json TEXT NOT NULL DEFAULT '[]',
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(member_id) REFERENCES Members(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS GameSessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    member_id INTEGER NOT NULL,
-    game TEXT NOT NULL,
-    secret INTEGER,
-    moves INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(member_id) REFERENCES Members(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS Bookings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    member_id INTEGER NOT NULL,
-    table_number TEXT NOT NULL,
-    table_label TEXT NOT NULL,
-    capacity INTEGER NOT NULL,
-    seats INTEGER NOT NULL,
-    date TEXT NOT NULL,
-    slot_id TEXT NOT NULL,
-    slot_label TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(member_id) REFERENCES Members(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS Settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS MenuItems (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    price REAL NOT NULL,
-    category TEXT NOT NULL DEFAULT 'General',
-    image TEXT NOT NULL DEFAULT '',
-    active INTEGER NOT NULL DEFAULT 1
-  );
-`;
-
-// ----------------------- PostgreSQL (Supabase) schema -----------------------
-
-const PG_SCHEMA_SQL = `
-  CREATE TABLE IF NOT EXISTS Members (
-    id SERIAL PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL,
-    balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-    money DOUBLE PRECISION NOT NULL DEFAULT 0,
-    phone TEXT NOT NULL DEFAULT '',
-    address TEXT NOT NULL DEFAULT '',
-    upi_id TEXT NOT NULL DEFAULT ''
-  );
-
-  CREATE TABLE IF NOT EXISTS GameLimits (
-    member_id INTEGER NOT NULL,
-    game TEXT NOT NULL,
-    plays INTEGER NOT NULL DEFAULT 0,
-    cooldown_until BIGINT NOT NULL DEFAULT 0,
-    PRIMARY KEY (member_id, game),
-    FOREIGN KEY(member_id) REFERENCES Members(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS Transactions (
-    id SERIAL PRIMARY KEY,
-    member_id INTEGER NOT NULL,
-    order_details TEXT NOT NULL,
-    total DOUBLE PRECISION NOT NULL,
-    sc_used DOUBLE PRECISION NOT NULL DEFAULT 0,
-    items_json TEXT NOT NULL DEFAULT '[]',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    FOREIGN KEY(member_id) REFERENCES Members(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS GameSessions (
-    id SERIAL PRIMARY KEY,
-    member_id INTEGER NOT NULL,
-    game TEXT NOT NULL,
-    secret INTEGER,
-    moves INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    FOREIGN KEY(member_id) REFERENCES Members(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS Bookings (
-    id SERIAL PRIMARY KEY,
-    member_id INTEGER NOT NULL,
-    table_number TEXT NOT NULL,
-    table_label TEXT NOT NULL,
-    capacity INTEGER NOT NULL,
-    seats INTEGER NOT NULL,
-    date TEXT NOT NULL,
-    slot_id TEXT NOT NULL,
-    slot_label TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    FOREIGN KEY(member_id) REFERENCES Members(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS Settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS MenuItems (
-    id SERIAL PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL,
-    price DOUBLE PRECISION NOT NULL,
-    category TEXT NOT NULL DEFAULT 'General',
-    image TEXT NOT NULL DEFAULT '',
-    active SMALLINT NOT NULL DEFAULT 1
-  );
-`;
-
-// ----------------------------- Local backend ------------------------------
-
-function resolveDataDir(): string {
-  const cwdDir = path.join(process.cwd(), 'data');
-  try {
-    fs.mkdirSync(cwdDir, { recursive: true });
-    fs.accessSync(cwdDir, fs.constants.W_OK);
-    return cwdDir;
-  } catch {
-    return path.join(os.tmpdir(), 'snake_cafe_data');
-  }
-}
-
-const DATA_DIR = resolveDataDir();
-const DB_PATH = path.join(DATA_DIR, 'snake_cafe.db');
-
-type LocalDb = InstanceType<typeof import('node:sqlite')['DatabaseSync']>;
-
-let localDb: LocalDb | null = null;
-
-let nodeSqlitePromise: Promise<typeof import('node:sqlite')> | null = null;
-
-function loadNodeSqlite(): Promise<typeof import('node:sqlite')> {
-  if (!nodeSqlitePromise) {
-    nodeSqlitePromise = import('node:sqlite').catch((cause: unknown) => {
-      nodeSqlitePromise = null;
-      throw new Error(
-        'This runtime does not support the built-in Node.js SQLite module (node:sqlite). ' +
-          'Use Node 22.5+ locally, or on the host set DATABASE_URL and TURSO_AUTH_TOKEN to use a Turso database.',
-        { cause }
-      );
-    });
-  }
-  return nodeSqlitePromise;
-}
-
-async function localDatabase(): Promise<LocalDb> {
-  if (!localDb) {
-    const mod = await loadNodeSqlite();
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    localDb = new mod.DatabaseSync(DB_PATH);
-    localDb.exec(SCHEMA_SQL);
-    ensureMenuImageColumnSync();
-    seedSettingsSync();
-    ensureMoneyColumnSync();
-    ensureProfileColumnsSync();
-    ensureInvoiceColumnsSync();
-    seedMenuSync();
-  }
-  return localDb;
-}
-
-async function localRun(sql: string, params: unknown[] = []): Promise<StmtResult> {
-  const result = (await localDatabase()).prepare(sql).run(...(params as never[]));
-  return { lastInsertRowid: Number(result.lastInsertRowid), changes: Number(result.changes) };
-}
-
-async function localGet<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T | undefined> {
-  return (await localDatabase()).prepare(sql).get(...(params as never[])) as T | undefined;
-}
-
-async function localAll<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
-  return (await localDatabase()).prepare(sql).all(...(params as never[])) as T[];
-}
-
-async function localExec(sql: string): Promise<void> {
-  (await localDatabase()).exec(sql);
-}
-
-// Serialize transactions on the single local connection so concurrent requests
-// can't interleave BEGIN/COMMIT blocks.
-let localTxChain: Promise<unknown> = Promise.resolve();
-
-async function localTransaction<T>(work: (tx: Backend) => Promise<T>): Promise<T> {
-  const run = localTxChain.then(async () => {
-    const db = await localDatabase();
-    db.exec('BEGIN');
-    const tx: Backend = {
-      exec: localExec,
-      run: localRun,
-      get: localGet,
-      all: localAll,
-      transaction: localTransaction,
-    };
-    try {
-      const result = await work(tx);
-      db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      db.exec('ROLLBACK');
-      throw error;
-    }
-  });
-  localTxChain = run.then(
-    () => undefined,
-    () => undefined
-  );
-  return run;
-}
-
-// ----------------------- Remote (Supabase / PostgreSQL) --------------------
-
-function isRemote(): boolean {
+export function isDatabaseConfigured(): boolean {
   const url = process.env.DATABASE_URL;
-  return typeof url === 'string' && url.length > 0 && /^(postgres|postgresql):\/\//.test(url);
+  return typeof url === 'string' && url.trim().length > 0;
 }
-
-let pgPool: Pool | null = null;
-let pgInit: Promise<void> | null = null;
 
 function getPool(): Pool {
-  if (!pgPool) {
-    pgPool = new Pool({
+  if (!pool) {
+    if (!isDatabaseConfigured()) {
+      throw new Error(
+        'DATABASE_URL is not set. Copy .env.example to .env.local and add your Supabase connection string.'
+      );
+    }
+    pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      max: 4,
+      max: 5,
+      idleTimeoutMillis: 30_000,
+      // Supabase requires TLS. The pooler and direct connections both work with this.
       ssl: { rejectUnauthorized: false },
     });
+    pool.on('error', (error) => {
+      console.error('[db] unexpected postgres error:', error.message);
+    });
   }
-  return pgPool;
+  return pool;
 }
 
-// node-postgres uses $1..$n placeholders; our SQL uses SQLite-style `?`.
-function toPgQuery(sql: string, params: unknown[]): { text: string; values: unknown[] } {
-  if (params.length === 0) return { text: sql, values: [] };
-  let index = 0;
-  const text = sql.replace(/\?/g, () => `$${++index}`);
-  return { text, values: params };
+// ---------------------------------------------------------------------------
+// Query helpers
+// ---------------------------------------------------------------------------
+
+export interface Db {
+  rows<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<T[]>;
+  one<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<T | undefined>;
+  exec(text: string, params?: unknown[]): Promise<number>;
 }
 
-async function pgQuery(
-  source: Pool | PoolClient,
-  text: string,
-  values: unknown[] = []
-): Promise<QueryResult> {
-  // With no bound params use the simple query protocol so multi-statement SQL works.
-  return values.length === 0
-    ? source.query(text)
-    : source.query(text, values as never[]);
-}
-
-async function ensurePgReady(): Promise<void> {
-  if (!pgInit) {
-    pgInit = initPg();
-  }
-  await pgInit;
-}
-
-async function initPg(): Promise<void> {
-  const pool = getPool();
-  await pgQuery(pool, PG_SCHEMA_SQL);
-  await ensurePgMenuImageColumn(pool);
-  await seedPgSettings(pool);
-  await ensurePgMoneyColumn(pool);
-  await ensurePgProfileColumns(pool);
-  await ensurePgInvoiceColumns(pool);
-  await seedPgMenu(pool);
-}
-
-async function pgTableColumns(pool: Pool, table: string): Promise<string[]> {
-  const res = await pgQuery(
-    pool,
-    'SELECT column_name FROM information_schema.columns WHERE table_name = lower($1)',
-    [table]
-  );
-  return res.rows.map((r) => String((r as { column_name: unknown }).column_name));
-}
-
-async function pgExec(sql: string): Promise<void> {
-  await ensurePgReady();
-  await pgQuery(getPool(), sql);
-}
-
-async function pgRun(sql: string, params: unknown[] = []): Promise<StmtResult> {
-  await ensurePgReady();
-  const q = toPgQuery(sql, params);
-  const queryText =
-    /^\s*INSERT/i.test(q.text) && !/RETURNING/i.test(q.text)
-      ? `${q.text} RETURNING id`
-      : q.text;
-  const res = await pgQuery(getPool(), queryText, q.values);
-  const first = res.rows[0] as { id?: number | bigint } | undefined;
+function dbFor(executor: Pool | PoolClient): Db {
   return {
-    lastInsertRowid: first && first.id !== undefined ? Number(first.id) : 0,
-    changes: res.rowCount ?? 0,
+    async rows<T>(text: string, params: unknown[] = []): Promise<T[]> {
+      const res = await executor.query(text, params as never[]);
+      return res.rows as T[];
+    },
+    async one<T>(text: string, params: unknown[] = []): Promise<T | undefined> {
+      const res = await executor.query(text, params as never[]);
+      return res.rows[0] as T | undefined;
+    },
+    async exec(text: string, params: unknown[] = []): Promise<number> {
+      const res = await executor.query(text, params as never[]);
+      return res.rowCount ?? 0;
+    },
   };
 }
 
-async function pgGet<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T | undefined> {
-  await ensurePgReady();
-  const q = toPgQuery(sql, params);
-  const res = await pgQuery(getPool(), q.text, q.values);
-  return res.rows[0] as T | undefined;
+let dbCache: Db | null = null;
+
+function db(): Db {
+  if (!dbCache) dbCache = dbFor(getPool());
+  return dbCache;
 }
 
-async function pgAll<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
-  await ensurePgReady();
-  const q = toPgQuery(sql, params);
-  const res = await pgQuery(getPool(), q.text, q.values);
-  return res.rows as T[];
-}
-
-async function pgTransaction<T>(work: (tx: Backend) => Promise<T>): Promise<T> {
-  await ensurePgReady();
+/** Run `work` inside a real Postgres transaction (BEGIN / COMMIT / ROLLBACK). */
+export async function transaction<T>(work: (tx: Db) => Promise<T>): Promise<T> {
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
-    const adapter: Backend = {
-      exec: async (sql) => {
-        await pgQuery(client, sql);
-      },
-      run: async (sql, params = []) => {
-        const q = toPgQuery(sql, params);
-        const queryText =
-          /^\s*INSERT/i.test(q.text) && !/RETURNING/i.test(q.text)
-            ? `${q.text} RETURNING id`
-            : q.text;
-        const res = await pgQuery(client, queryText, q.values);
-        const first = res.rows[0] as { id?: number | bigint } | undefined;
-        return {
-          lastInsertRowid: first && first.id !== undefined ? Number(first.id) : 0,
-          changes: res.rowCount ?? 0,
-        };
-      },
-      get: async <T2 = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
-        const q = toPgQuery(sql, params);
-        const res = await pgQuery(client, q.text, q.values);
-        return res.rows[0] as T2 | undefined;
-      },
-      all: async <T2 = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
-        const q = toPgQuery(sql, params);
-        const res = await pgQuery(client, q.text, q.values);
-        return res.rows as T2[];
-      },
-      transaction: pgTransaction,
-    };
-    const result = await work(adapter);
+    const result = await work(dbFor(client));
     await client.query('COMMIT');
     return result;
   } catch (error) {
@@ -488,297 +160,287 @@ async function pgTransaction<T>(work: (tx: Backend) => Promise<T>): Promise<T> {
   }
 }
 
-async function ensurePgMenuImageColumn(pool: Pool): Promise<void> {
-  const columns = await pgTableColumns(pool, 'MenuItems');
-  if (!columns.includes('image')) {
-    await pgQuery(pool, `ALTER TABLE MenuItems ADD COLUMN image TEXT NOT NULL DEFAULT ''`);
-  }
-  for (const item of MENU_SEED) {
-    if (item.image) {
-      await pgQuery(
-        pool,
-        `UPDATE MenuItems SET image = $1 WHERE name = $2 AND (image IS NULL OR image = '')`,
-        [item.image, item.name]
+// ---------------------------------------------------------------------------
+// First-run seeding
+//
+// The schema lives in supabase/schema.sql. All this does is insert the rows
+// that have to exist for the app to boot: default settings and the starter
+// menu. Both are idempotent, so restarting never duplicates anything and
+// never overwrites something the admin edited.
+// ---------------------------------------------------------------------------
+
+const SETTING_DEFAULTS: Record<string, string> = {
+  store_name: 'Snake Cafe',
+  currency_name: 'Snake Coins',
+  currency_symbol: 'SC',
+  welcome_bonus: '20',
+  timezone: 'Asia/Kolkata',
+  max_discount_percent: '50',
+  gst_percent: '0',
+  fssai_number: '',
+  gstin: '',
+  invoice_note: '',
+};
+
+let seedPromise: Promise<void> | null = null;
+
+function ensureSeeded(): Promise<void> {
+  if (!seedPromise) {
+    seedPromise = (async () => {
+      const defaultPasscode = process.env.SNAKE_CAFE_ADMIN_PASSCODE ?? 'admin123';
+      const defaults: Record<string, string> = {
+        ...SETTING_DEFAULTS,
+        admin_passcode_hash: hashSecret(defaultPasscode),
+      };
+      for (const [key, value] of Object.entries(defaults)) {
+        await db().exec(
+          'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING',
+          [key, value]
+        );
+      }
+      for (const item of MENU_SEED) {
+        await db().exec(
+          `INSERT INTO menu_items (name, price, category, image)
+           VALUES ($1, $2, $3, $4) ON CONFLICT (name) DO NOTHING`,
+          [item.name, item.price, item.category, item.image]
+        );
+      }
+
+      // Older databases stored the passcode as a plain SHA-256 hash. Replace
+      // that with the scrypt format so the admin panel stays reachable.
+      const stored = await db().one<{ value: string }>(
+        'SELECT value FROM settings WHERE key = $1',
+        ['admin_passcode_hash']
       );
-    }
+      if (!stored?.value?.includes(':')) {
+        await db().exec(
+          `INSERT INTO settings (key, value) VALUES ($1, $2)
+           ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+          ['admin_passcode_hash', hashSecret(defaultPasscode)]
+        );
+      }
+    })().catch((error: unknown) => {
+      seedPromise = null; // allow a retry on the next request
+      if (isMissingTable(error)) {
+        throw new Error(
+          'Database tables are missing. Run supabase/schema.sql in the Supabase SQL Editor, then reload.'
+        );
+      }
+      throw error;
+    });
   }
+  return seedPromise;
 }
 
-async function seedPgSettings(pool: Pool): Promise<void> {
-  const defaultPasscode = process.env.SNAKE_CAFE_ADMIN_PASSCODE ?? 'admin123';
-  const defaults: Record<string, string> = {
-    ...SETTING_DEFAULTS,
-    admin_passcode_hash: hashPasscode(defaultPasscode),
-  };
-  for (const [key, value] of Object.entries(defaults)) {
-    await pgQuery(pool, 'INSERT INTO Settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING', [
-      key,
-      value,
-    ]);
-  }
+/** Wait for the seed to finish, then hand back the query helpers. */
+async function ready(): Promise<Db> {
+  await ensureSeeded();
+  return db();
 }
 
-async function ensurePgMoneyColumn(pool: Pool): Promise<void> {
-  const columns = await pgTableColumns(pool, 'Members');
-  if (!columns.includes('money')) {
-    await pgQuery(pool, `ALTER TABLE Members ADD COLUMN money DOUBLE PRECISION NOT NULL DEFAULT 0`);
-  }
-  const row = await pgQuery(pool, 'SELECT value FROM Settings WHERE key = $1', ['welcome_bonus']);
-  const welcome =
-    (row.rows[0] as { value?: string } | undefined)?.value ?? SETTING_DEFAULTS.welcome_bonus;
-  await pgQuery(pool, 'UPDATE Members SET money = $1 WHERE money IS NULL OR money = 0', [Number(welcome)]);
-}
-
-async function ensurePgProfileColumns(pool: Pool): Promise<void> {
-  const columns = await pgTableColumns(pool, 'Members');
-  for (const col of ['phone', 'address', 'upi_id'] as const) {
-    if (!columns.includes(col)) {
-      await pgQuery(pool, `ALTER TABLE Members ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
-    }
-  }
-}
-
-async function ensurePgInvoiceColumns(pool: Pool): Promise<void> {
-  const columns = await pgTableColumns(pool, 'Transactions');
-  if (!columns.includes('sc_used')) {
-    await pgQuery(pool, `ALTER TABLE Transactions ADD COLUMN sc_used DOUBLE PRECISION NOT NULL DEFAULT 0`);
-  }
-  if (!columns.includes('items_json')) {
-    await pgQuery(pool, `ALTER TABLE Transactions ADD COLUMN items_json TEXT NOT NULL DEFAULT '[]'`);
-  }
-}
-
-async function seedPgMenu(pool: Pool): Promise<void> {
-  const res = await pgQuery(pool, 'SELECT COUNT(*) AS n FROM MenuItems');
-  const n = (res.rows[0] as { n?: unknown } | undefined)?.n;
-  if (Number(n ?? 0) > 0) return;
-  for (const item of MENU_SEED) {
-    await pgQuery(
-      pool,
-      'INSERT INTO MenuItems (name, price, category, image) VALUES ($1, $2, $3, $4)',
-      [item.name, item.price, item.category, item.image]
-    );
-  }
-}
-
-async function getPgSetting(key: string): Promise<string | null> {
-  const row = await pgGet<{ value: string }>('SELECT value FROM Settings WHERE key = ?', [key]);
-  return row?.value ?? null;
-}
-
-// ----------------------------- Local migration helpers --------------------
-
-function ensureMenuImageColumnSync(): void {
-  if (!localDb) return;
-  const columns = localDb.prepare('PRAGMA table_info(MenuItems)').all() as { name: string }[];
-  if (!columns.some((c) => c.name === 'image')) {
-    localDb.exec(`ALTER TABLE MenuItems ADD COLUMN image TEXT NOT NULL DEFAULT ''`);
-  }
-  const backfill = localDb.prepare(
-    `UPDATE MenuItems SET image = ? WHERE name = ? AND (image IS NULL OR image = '')`
-  );
-  for (const item of MENU_SEED) {
-    if (item.image) backfill.run(item.image, item.name);
-  }
-}
-
-function seedSettingsSync(): void {
-  if (!localDb) return;
-  const defaultPasscode = process.env.SNAKE_CAFE_ADMIN_PASSCODE ?? 'admin123';
-  const existing = new Set(
-    (localDb.prepare('SELECT key FROM Settings').all() as { key: string }[]).map((r) => r.key)
-  );
-  const defaults: Record<string, string> = {
-    ...SETTING_DEFAULTS,
-    admin_passcode_hash: hashPasscode(defaultPasscode),
-  };
-  const insert = localDb.prepare('INSERT OR IGNORE INTO Settings (key, value) VALUES (?, ?)');
-  for (const [key, value] of Object.entries(defaults)) {
-    if (!existing.has(key)) insert.run(key, value);
-  }
-}
-
-function ensureMoneyColumnSync(): void {
-  if (!localDb) return;
-  const columns = localDb.prepare('PRAGMA table_info(Members)').all() as { name: string }[];
-  if (!columns.some((c) => c.name === 'money')) {
-    localDb.exec(`ALTER TABLE Members ADD COLUMN money REAL NOT NULL DEFAULT 0`);
-  }
-  const welcome = getSettingSync('welcome_bonus') ?? SETTING_DEFAULTS.welcome_bonus;
-  localDb.prepare('UPDATE Members SET money = ? WHERE money IS NULL OR money = 0').run(Number(welcome));
-}
-
-function ensureProfileColumnsSync(): void {
-  if (!localDb) return;
-  const columns = localDb.prepare('PRAGMA table_info(Members)').all() as { name: string }[];
-  for (const col of ['phone', 'address', 'upi_id'] as const) {
-    if (!columns.some((c) => c.name === col)) {
-      localDb.exec(`ALTER TABLE Members ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
-    }
-  }
-}
-
-function ensureInvoiceColumnsSync(): void {
-  if (!localDb) return;
-  const columns = localDb.prepare('PRAGMA table_info(Transactions)').all() as { name: string }[];
-  if (!columns.some((c) => c.name === 'sc_used')) {
-    localDb.exec(`ALTER TABLE Transactions ADD COLUMN sc_used REAL NOT NULL DEFAULT 0`);
-  }
-  if (!columns.some((c) => c.name === 'items_json')) {
-    localDb.exec(`ALTER TABLE Transactions ADD COLUMN items_json TEXT NOT NULL DEFAULT '[]'`);
-  }
-}
-
-function seedMenuSync(): void {
-  if (!localDb) return;
-  const count = (localDb.prepare('SELECT COUNT(*) AS n FROM MenuItems').get() as { n: number }).n;
-  if (count > 0) return;
-  const insert = localDb.prepare(
-    'INSERT INTO MenuItems (name, price, category, image, active) VALUES (?, ?, ?, ?, 1)'
-  );
-  for (const item of MENU_SEED) {
-    insert.run(item.name, item.price, item.category, item.image);
-  }
-}
-
-function getSettingSync(key: string): string | null {
-  if (!localDb) return null;
-  const row = localDb.prepare('SELECT value FROM Settings WHERE key = ?').get(key) as
-    | { value: string }
-    | undefined;
-  return row?.value ?? null;
-}
-
-// ----------------------------- Facade ------------------------------
-
-export function getDb(): Backend {
-  if (isRemote()) {
-    return {
-      exec: pgExec,
-      run: pgRun,
-      get: pgGet,
-      all: pgAll,
-      transaction: pgTransaction,
-    };
-  }
-  return {
-    exec: localExec,
-    run: localRun,
-    get: localGet,
-    all: localAll,
-    transaction: localTransaction,
-  };
-}
-
-// ---- Game turn limits ----
-
-interface GameLimitState {
-  allowed: boolean;
-  cooldown: boolean;
-  retryAfterMs: number | null;
-  attemptsLeft: number;
-}
-
-async function readGameLimit(memberId: number, game: string): Promise<{ plays: number; cooldown_until: number }> {
-  const row = await getDb().get<{ plays: number; cooldown_until: number }>(
-    'SELECT plays, cooldown_until FROM GameLimits WHERE member_id = ? AND game = ?',
-    [memberId, game]
-  );
-  return { plays: row?.plays ?? 0, cooldown_until: Number(row?.cooldown_until ?? 0) };
-}
-
-async function writeGameLimit(memberId: number, game: string, plays: number, cooldownUntil: number): Promise<void> {
-  await getDb().run(
-    `INSERT INTO GameLimits (member_id, game, plays, cooldown_until) VALUES (?, ?, ?, ?)
-     ON CONFLICT(member_id, game) DO UPDATE SET
-       plays = excluded.plays,
-       cooldown_until = excluded.cooldown_until`,
-    [memberId, game, plays, cooldownUntil]
+function isMissingTable(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: string }).code === '42P01'
   );
 }
 
-function gameLimitState(plays: number, cooldownUntil: number, now: number): GameLimitState {
-  if (cooldownUntil > now) {
-    return { allowed: false, cooldown: true, retryAfterMs: cooldownUntil, attemptsLeft: 0 };
-  }
-  return { allowed: true, cooldown: false, retryAfterMs: null, attemptsLeft: MAX_GAME_TURNS - plays };
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: string }).code === '23505'
+  );
 }
 
-/** Read-only view of how many turns a member has left (does not consume a turn). */
-export async function getGameState(memberId: number, game: string): Promise<GameLimitState> {
-  const { plays, cooldown_until } = await readGameLimit(memberId, game);
-  return gameLimitState(plays, cooldown_until, Date.now());
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
-/**
- * Record the outcome of one game session.
- * - Losing consumes one of the 3 daily tries; the 3rd loss starts a 24h cooldown.
- * - Winning starts the 24h cooldown immediately, even on the 1st or 2nd try.
- */
-export async function recordGameOutcome(memberId: number, game: string, won: boolean): Promise<GameLimitState> {
-  const now = Date.now();
-  const { plays, cooldown_until } = await readGameLimit(memberId, game);
-  if (cooldown_until > now) {
-    return gameLimitState(plays, cooldown_until, now);
-  }
-
-  if (won) {
-    await writeGameLimit(memberId, game, 0, now + GAME_COOLDOWN_MS);
-    return { allowed: false, cooldown: true, retryAfterMs: now + GAME_COOLDOWN_MS, attemptsLeft: 0 };
-  }
-
-  if (plays + 1 >= MAX_GAME_TURNS) {
-    await writeGameLimit(memberId, game, 0, now + GAME_COOLDOWN_MS);
-    return { allowed: false, cooldown: true, retryAfterMs: now + GAME_COOLDOWN_MS, attemptsLeft: 0 };
-  }
-
-  await writeGameLimit(memberId, game, plays + 1, 0);
-  return { allowed: true, cooldown: false, retryAfterMs: null, attemptsLeft: MAX_GAME_TURNS - (plays + 1) };
+function toIso(value: unknown): string {
+  const date = value instanceof Date ? value : new Date(String(value ?? ''));
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
 }
 
-// ---- Settings ----
+// ---------------------------------------------------------------------------
+// Admin passcode (scrypt, salted per hash)
+// ---------------------------------------------------------------------------
+
+const SECRET_KEY_BYTES = 64;
+
+/** Hash a password or passcode with a per-hash random salt. */
+export function hashSecret(secret: string): string {
+  const salt = randomBytes(16).toString('hex');
+  const derived = scryptSync(secret, salt, SECRET_KEY_BYTES).toString('hex');
+  return `${salt}:${derived}`;
+}
+
+export function verifySecret(secret: string, stored: string): boolean {
+  const [salt, expected] = stored.split(':');
+  if (!salt || !expected) return false;
+  const actual = scryptSync(secret, salt, SECRET_KEY_BYTES);
+  const expectedBuf = Buffer.from(expected, 'hex');
+  if (actual.length !== expectedBuf.length) return false;
+  return timingSafeEqual(actual, expectedBuf);
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
 
 export async function getSetting(key: string): Promise<string | null> {
-  if (isRemote()) return getPgSetting(key);
-  await localDatabase();
-  return getSettingSync(key);
+  const row = await (await ready()).one<{ value: string }>(
+    'SELECT value FROM settings WHERE key = $1',
+    [key]
+  );
+  return row?.value ?? null;
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {
-  await getDb().run('INSERT INTO Settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [
-    key,
-    value,
-  ]);
+  await (await ready()).exec(
+    'INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+    [key, value]
+  );
 }
 
 export async function getStoreSettings(): Promise<StoreSettings> {
+  const d = await ready();
+  const rows = await d.rows<{ key: string; value: string }>(
+    'SELECT key, value FROM settings WHERE key = ANY($1::text[])',
+    [Object.keys(SETTING_DEFAULTS)]
+  );
+  const values = new Map(rows.map((r) => [r.key, r.value]));
+  const read = (key: string, fallback: string) => values.get(key) ?? fallback;
   return {
-    storeName: (await getSetting('store_name')) ?? SETTING_DEFAULTS.store_name,
-    currencyName: (await getSetting('currency_name')) ?? SETTING_DEFAULTS.currency_name,
-    currencySymbol: (await getSetting('currency_symbol')) ?? SETTING_DEFAULTS.currency_symbol,
-    welcomeBonus: Number((await getSetting('welcome_bonus')) ?? SETTING_DEFAULTS.welcome_bonus),
+    storeName: read('store_name', SETTING_DEFAULTS.store_name),
+    currencyName: read('currency_name', SETTING_DEFAULTS.currency_name),
+    currencySymbol: read('currency_symbol', SETTING_DEFAULTS.currency_symbol),
+    welcomeBonus: Number(read('welcome_bonus', SETTING_DEFAULTS.welcome_bonus)),
+    timezone: read('timezone', DEFAULT_TIME_ZONE),
+    maxDiscountPercent: clampPercent(
+      Number(read('max_discount_percent', SETTING_DEFAULTS.max_discount_percent))
+    ),
+    gstPercent: clampGst(Number(read('gst_percent', SETTING_DEFAULTS.gst_percent))),
+    fssaiNumber: read('fssai_number', SETTING_DEFAULTS.fssai_number).trim(),
+    gstin: read('gstin', SETTING_DEFAULTS.gstin).trim().toUpperCase(),
+    invoiceNote: read('invoice_note', SETTING_DEFAULTS.invoice_note).trim(),
   };
+}
+
+/** Keep an admin-entered percentage inside 0–100. */
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 50;
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+/** GST rates may carry decimals (e.g. 5.5), so keep two places instead of rounding. */
+function clampGst(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(50, Math.max(0, round2(value)));
 }
 
 export async function passcodeMatches(passcode: string): Promise<boolean> {
   const stored = await getSetting('admin_passcode_hash');
   if (!stored) return false;
-  const candidate = hashPasscode(passcode);
-  if (stored.length !== candidate.length) return false;
-  return timingSafeEqual(Buffer.from(stored, 'utf8'), Buffer.from(candidate, 'utf8'));
+  return verifySecret(passcode, stored);
 }
 
 export async function setAdminPasscode(passcode: string): Promise<void> {
-  await setSetting('admin_passcode_hash', hashPasscode(passcode));
+  await setSetting('admin_passcode_hash', hashSecret(passcode));
 }
 
-// ---- Members ----
+// ---------------------------------------------------------------------------
+// Admin login throttling
+//
+// After ADMIN_MAX_ATTEMPTS wrong passcodes the panel locks for
+// ADMIN_LOCK_MINUTES. The counters live in `settings`, so restarting the app
+// (or a serverless cold start) does not wipe the lockout.
+// ---------------------------------------------------------------------------
+
+const ADMIN_MAX_ATTEMPTS = 5;
+const ADMIN_LOCK_MS = 15 * 60 * 1000;
+
+export interface AdminLoginState {
+  locked: boolean;
+  retryAfterMs: number;
+  attemptsLeft: number;
+}
+
+export async function adminLoginState(): Promise<AdminLoginState> {
+  const rows = await (
+    await ready()
+  ).rows<{ key: string; value: string }>(
+    'SELECT key, value FROM settings WHERE key = ANY($1::text[])',
+    [['admin_failed_attempts', 'admin_locked_until']]
+  );
+  const values = new Map(rows.map((r) => [r.key, r.value]));
+  const lockedUntil = Number(values.get('admin_locked_until') ?? 0);
+  const failed = Number(values.get('admin_failed_attempts') ?? 0);
+  const now = Date.now();
+
+  if (lockedUntil > now) {
+    return {
+      locked: true,
+      retryAfterMs: lockedUntil - now,
+      attemptsLeft: 0,
+    };
+  }
+  if (lockedUntil) {
+    // The lock expired; start with a clean slate.
+    await Promise.all([
+      setSetting('admin_failed_attempts', '0'),
+      setSetting('admin_locked_until', '0'),
+    ]);
+    return { locked: false, retryAfterMs: 0, attemptsLeft: ADMIN_MAX_ATTEMPTS };
+  }
+  return {
+    locked: false,
+    retryAfterMs: 0,
+    attemptsLeft: Math.max(0, ADMIN_MAX_ATTEMPTS - failed),
+  };
+}
+
+/** Record one wrong passcode and lock the panel once the limit is reached. */
+export async function registerAdminFailure(): Promise<AdminLoginState> {
+  const current = await adminLoginState();
+  if (current.locked) return current;
+
+  const failed = ADMIN_MAX_ATTEMPTS - current.attemptsLeft + 1;
+  if (failed >= ADMIN_MAX_ATTEMPTS) {
+    const until = Date.now() + ADMIN_LOCK_MS;
+    await Promise.all([
+      setSetting('admin_failed_attempts', '0'),
+      setSetting('admin_locked_until', String(until)),
+    ]);
+    return { locked: true, retryAfterMs: ADMIN_LOCK_MS, attemptsLeft: 0 };
+  }
+
+  await setSetting('admin_failed_attempts', String(failed));
+  return {
+    locked: false,
+    retryAfterMs: 0,
+    attemptsLeft: ADMIN_MAX_ATTEMPTS - failed,
+  };
+}
+
+export async function clearAdminFailures(): Promise<void> {
+  await Promise.all([
+    setSetting('admin_failed_attempts', '0'),
+    setSetting('admin_locked_until', '0'),
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Members
+// ---------------------------------------------------------------------------
 
 interface MemberRow {
   id: number;
+  username: string | null;
   name: string;
-  balance: number;
   money: number;
+  sc: number;
   phone: string;
   address: string;
   upi_id: string;
@@ -787,41 +449,123 @@ interface MemberRow {
 function rowToMember(row: MemberRow): Member {
   return {
     id: row.id,
+    username: row.username ?? '',
     name: row.name,
-    sc: row.balance,
-    money: row.money,
+    sc: Number(row.sc ?? 0),
+    money: Number(row.money ?? 0),
     phone: row.phone ?? '',
     address: row.address ?? '',
     upiId: row.upi_id ?? '',
   };
 }
 
-const MEMBER_COLUMNS = 'id, name, balance, money, phone, address, upi_id';
+const MEMBER_COLUMNS = 'id, username, name, money, sc, phone, address, upi_id';
 
 export async function getMember(id: number): Promise<Member | null> {
-  const row = await getDb().get<MemberRow>(`SELECT ${MEMBER_COLUMNS} FROM Members WHERE id = ?`, [id]);
+  const row = await (await ready()).one<MemberRow>(
+    `SELECT ${MEMBER_COLUMNS} FROM members WHERE id = $1`,
+    [id]
+  );
   return row ? rowToMember(row) : null;
 }
 
 export async function findMemberByName(name: string): Promise<Member | null> {
-  const row = await getDb().get<MemberRow>(`SELECT ${MEMBER_COLUMNS} FROM Members WHERE name = ?`, [name]);
+  const row = await (await ready()).one<MemberRow>(
+    `SELECT ${MEMBER_COLUMNS} FROM members WHERE name = $1`,
+    [name]
+  );
   return row ? rowToMember(row) : null;
 }
 
-export async function createMember(name: string, welcomeMoney: number): Promise<Member> {
-  const result = await getDb().run('INSERT INTO Members (name, balance, money) VALUES (?, 0, ?)', [
-    name,
-    welcomeMoney,
-  ]);
-  return {
-    id: Number(result.lastInsertRowid),
-    name,
-    sc: 0,
-    money: welcomeMoney,
-    phone: '',
-    address: '',
-    upiId: '',
-  };
+export class MemberAuthError extends Error {}
+
+const USERNAME_PATTERN = /^[a-z0-9._-]{3,30}$/;
+
+/** Create a member account. `username` is the member ID used to log in. */
+export async function createMemberAccount(
+  username: string,
+  password: string,
+  welcomeMoney: number,
+  consent: boolean
+): Promise<Member> {
+  const cleanUsername = username.trim().toLowerCase();
+  if (!USERNAME_PATTERN.test(cleanUsername)) {
+    throw new MemberAuthError(
+      'Member ID must be 3–30 characters using letters, numbers, dots, dashes or underscores.'
+    );
+  }
+  if (password.length < 8) {
+    throw new MemberAuthError('Password must be at least 8 characters long.');
+  }
+  if (password.length > 200) {
+    throw new MemberAuthError('Password must be 200 characters or fewer.');
+  }
+
+  const displayName = username.trim();
+  try {
+    const row = await (await ready()).one<{ id: number }>(
+      `INSERT INTO members (username, password_hash, name, money, sc, consent_at)
+       VALUES ($1, $2, $3, $4, 0, CASE WHEN $5 THEN now() ELSE NULL END) RETURNING id`,
+      [cleanUsername, hashSecret(password), displayName, welcomeMoney, consent]
+    );
+    return {
+      id: Number(row?.id ?? 0),
+      username: cleanUsername,
+      name: displayName,
+      sc: 0,
+      money: welcomeMoney,
+      phone: '',
+      address: '',
+      upiId: '',
+    };
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw new MemberAuthError('That member ID is already taken. Pick another one.');
+    }
+    throw error;
+  }
+}
+
+interface MemberAuthRow extends MemberRow {
+  password_hash: string;
+}
+
+/** Return the member when the ID and password match, otherwise null. */
+export async function verifyMemberCredentials(
+  username: string,
+  password: string
+): Promise<Member | null> {
+  const cleanUsername = username.trim().toLowerCase();
+  if (!cleanUsername || !password) return null;
+
+  const row = await (await ready()).one<MemberAuthRow>(
+    `SELECT ${MEMBER_COLUMNS}, password_hash FROM members WHERE lower(username) = $1`,
+    [cleanUsername]
+  );
+  if (!row || !row.password_hash) return null;
+  if (!verifySecret(password, row.password_hash)) return null;
+  return rowToMember(row);
+}
+
+/**
+ * Permanently delete an account and everything attached to it.
+ *
+ * Orders, coin history, bookings and game sessions all reference `members` with
+ * ON DELETE CASCADE, so one DELETE removes the member's personal data. The
+ * password is required so a borrowed session cannot wipe the account.
+ */
+export async function deleteMemberAccount(
+  memberId: number,
+  password: string
+): Promise<boolean> {
+  const row = await (await ready()).one<{ password_hash: string }>(
+    'SELECT password_hash FROM members WHERE id = $1',
+    [memberId]
+  );
+  if (!row?.password_hash) return false;
+  if (!verifySecret(password, row.password_hash)) return false;
+  await (await ready()).exec('DELETE FROM members WHERE id = $1', [memberId]);
+  return true;
 }
 
 export async function updateMemberProfile(
@@ -842,9 +586,6 @@ export async function updateMemberProfile(
   if (phone && !/^\d{10}$/.test(phone)) {
     throw new MemberProfileError('Phone number must be exactly 10 digits (e.g. 9876543210).');
   }
-  if (phone.length > 20) {
-    throw new MemberProfileError('Phone number is too long.');
-  }
   if (address.length > 300) {
     throw new MemberProfileError('Address must be 300 characters or fewer.');
   }
@@ -852,45 +593,144 @@ export async function updateMemberProfile(
     throw new MemberProfileError('UPI ID must be 60 characters or fewer.');
   }
 
-  if (name !== current.name) {
-    const clash = await findMemberByName(name);
-    if (clash && clash.id !== memberId) {
-      throw new MemberProfileError(`The name "${name}" is already taken by another member.`);
-    }
-  }
-
-  await getDb().run('UPDATE Members SET name = ?, phone = ?, address = ?, upi_id = ? WHERE id = ?', [
-    name,
-    phone,
-    address,
-    upiId,
-    memberId,
-  ]);
+  await (await ready()).exec(
+    'UPDATE members SET name = $1, phone = $2, address = $3, upi_id = $4 WHERE id = $5',
+    [name, phone, address, upiId, memberId]
+  );
   return getMember(memberId);
 }
 
 export async function addMoney(memberId: number, amount: number): Promise<number> {
-  return getDb().transaction(async (db) => {
-    const current = await db.get<{ money: number }>('SELECT money FROM Members WHERE id = ?', [memberId]);
+  return transaction(async (tx) => {
+    const current = await tx.one<{ money: number }>('SELECT money FROM members WHERE id = $1', [
+      memberId,
+    ]);
     if (!current) throw new Error('Member not found');
-    const newMoney = Math.round((current.money + amount) * 100) / 100;
-    await db.run('UPDATE Members SET money = ? WHERE id = ?', [newMoney, memberId]);
+    const newMoney = round2(Number(current.money) + amount);
+    await tx.exec('UPDATE members SET money = $1 WHERE id = $2', [newMoney, memberId]);
     return newMoney;
   });
 }
 
-// ---- Orders ----
+// ---------------------------------------------------------------------------
+// Admin: members
+// ---------------------------------------------------------------------------
+
+export interface AdminMember {
+  id: number;
+  username: string;
+  name: string;
+  phone: string;
+  money: number;
+  sc: number;
+  createdAt: string;
+}
+
+/** Everyone with a member card, newest first, for the admin members list. */
+export async function listMembersForAdmin(): Promise<AdminMember[]> {
+  const rows = await (await ready()).rows<MemberRow & { created_at: Date }>(
+    `SELECT ${MEMBER_COLUMNS}, created_at FROM members ORDER BY name COLLATE "C", id`
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    username: row.username ?? '',
+    name: row.name,
+    phone: row.phone ?? '',
+    money: Number(row.money ?? 0),
+    sc: Number(row.sc ?? 0),
+    createdAt: toIso(row.created_at),
+  }));
+}
+
+/**
+ * Staff correction of a member's wallet and/or loyalty coins.
+ *
+ * Deltas (not replacement balances) are used so two staff members adjusting at
+ * the same time add up instead of overwriting each other. Coins always leave a
+ * ledger entry with the staff note, so the member can see why the balance moved.
+ */
+export async function adjustMemberBalances(
+  memberId: number,
+  moneyDelta: number,
+  coinDelta: number,
+  note: string
+): Promise<Member> {
+  const cleanNote = note.trim().slice(0, 120);
+  if (!Number.isFinite(moneyDelta) || !Number.isFinite(coinDelta)) {
+    throw new AdminError('Enter a valid amount to add or remove.');
+  }
+  if (Math.abs(moneyDelta) > 1_000_000 || Math.abs(coinDelta) > 1_000_000) {
+    throw new AdminError('That adjustment is too large. Keep it under ₹10,00,000 / 10,00,000 coins.');
+  }
+  if (moneyDelta === 0 && coinDelta === 0) {
+    throw new AdminError('Enter a wallet or coin amount to adjust.');
+  }
+
+  const updated = await transaction(async (tx) => {
+    const current = await tx.one<{ money: number; sc: number }>(
+      'SELECT money, sc FROM members WHERE id = $1 FOR UPDATE',
+      [memberId]
+    );
+    if (!current) throw new AdminError('Member not found.');
+
+    const newMoney = round2(Number(current.money) + round2(moneyDelta));
+    const newCoins = round2(Number(current.sc) + round2(coinDelta));
+    if (newMoney < 0) throw new AdminError('The wallet balance cannot go below ₹0.');
+    if (newCoins < 0) throw new AdminError('The coin balance cannot go below 0.');
+
+    await tx.exec('UPDATE members SET money = $1, sc = $2 WHERE id = $3', [
+      newMoney,
+      newCoins,
+      memberId,
+    ]);
+    if (coinDelta !== 0) {
+      await tx.exec(
+        `INSERT INTO coin_transactions (member_id, amount, reason, ref)
+         VALUES ($1, $2, 'admin_adjust', $3)`,
+        [memberId, round2(coinDelta), cleanNote]
+      );
+    }
+
+    // Read through the same transaction: the pooled connection used by
+    // getMember() cannot see uncommitted changes yet.
+    const row = await tx.one<MemberRow>(
+      `SELECT ${MEMBER_COLUMNS} FROM members WHERE id = $1`,
+      [memberId]
+    );
+    if (!row) throw new AdminError('Member not found.');
+    return rowToMember(row);
+  });
+
+  if (!updated) throw new AdminError('Member not found.');
+  return updated;
+}
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
 
 export async function placeOrder(
   memberId: number,
   items: { name: string; quantity: number }[],
-  scUsed: number
+  scUsed: number,
+  options: { orderType?: OrderType; tableNumber?: string; note?: string } = {}
 ) {
-  return getDb().transaction(async (db) => {
-    const rows = await db.all<{ name: string; price: number }>(
-      'SELECT name, price FROM MenuItems WHERE active = 1'
+  const orderType: OrderType = isOrderType(options.orderType) ? options.orderType : 'dine_in';
+  const tableNumber = orderType === 'dine_in' ? (options.tableNumber ?? '').trim() : '';
+  const note = (options.note ?? '').trim();
+
+  if (orderType === 'dine_in' && !TABLES.some((table) => table.id === tableNumber)) {
+    throw new OrderError('Pick the table you are sitting at.');
+  }
+  if (note.length > 200) {
+    throw new OrderError('Order note must be 200 characters or fewer.');
+  }
+
+  return transaction(async (tx) => {
+    const rows = await tx.rows<{ name: string; price: number }>(
+      'SELECT name, price FROM menu_items WHERE active = true'
     );
-    const priceMap = new Map(rows.map((r) => [r.name, r.price]));
+    const priceMap = new Map(rows.map((r) => [r.name, Number(r.price)]));
 
     let total = 0;
     const detailItems: { name: string; price: number; quantity: number }[] = [];
@@ -908,33 +748,97 @@ export async function placeOrder(
     const details = detailsParts.join(', ');
 
     const spentSc = Number.isFinite(scUsed) ? Math.floor(Math.max(0, scUsed)) : 0;
-    const discount = Math.round((spentSc / SC_PER_RUPEE) * 100) / 100;
-    if (discount > total) {
-      throw new MenuItemError('You applied more Snake Coins than the order total.');
-    }
-    const amountToPay = Math.round((total - discount) * 100) / 100;
 
-    const member = await db.get<{ balance: number; money: number }>('SELECT balance, money FROM Members WHERE id = ?', [
-      memberId,
-    ]);
+    // Loyalty coins may never pay the whole bill. The admin sets a cap
+    // (default 50%), so a large coin balance cannot make an order free.
+    const capRow = await tx.one<{ value: string }>(
+      "SELECT value FROM settings WHERE key = 'max_discount_percent'"
+    );
+    const capPercent = clampPercent(
+      Number(capRow?.value ?? SETTING_DEFAULTS.max_discount_percent)
+    );
+    const maxCoins = Math.floor(round2((total * capPercent) / 100) * SC_PER_RUPEE);
+    if (spentSc > maxCoins) {
+      throw new MenuItemError(
+        capPercent === 0
+          ? 'Loyalty coins cannot be used on this order.'
+          : `Loyalty coins can cover at most ${capPercent}% of this bill (${maxCoins} coins).`
+      );
+    }
+
+    const discount = round2(spentSc / SC_PER_RUPEE);
+    const amountToPay = round2(total - discount);
+
+    const member = await tx.one<{ money: number; sc: number; address: string; phone: string }>(
+      'SELECT money, sc, address, phone FROM members WHERE id = $1',
+      [memberId]
+    );
     if (!member) throw new Error('Member not found');
 
-    if (spentSc > 0 && spentSc > member.balance) {
-      throw new MenuItemError(`You only have ${member.balance.toFixed(0)} Snake Coins.`);
-    }
-    if (member.money < amountToPay) {
-      throw new InsufficientBalanceError(Math.round((amountToPay - member.money) * 100) / 100);
+    if (orderType === 'delivery' && !member.address.trim()) {
+      throw new OrderError('Add your delivery address in your profile before ordering delivery.');
     }
 
-    const newMoney = Math.round((member.money - amountToPay) * 100) / 100;
-    const newSc = Math.round((member.balance - spentSc) * 100) / 100;
-    await db.run('UPDATE Members SET money = ?, balance = ? WHERE id = ?', [newMoney, newSc, memberId]);
-    const inserted = await db.run(
-      'INSERT INTO Transactions (member_id, order_details, total, sc_used, items_json) VALUES (?, ?, ?, ?, ?)',
-      [memberId, details, amountToPay, spentSc, JSON.stringify(detailItems)]
+    if (spentSc > 0 && spentSc > Number(member.sc)) {
+      throw new MenuItemError(`You only have ${Number(member.sc).toFixed(0)} Snake Coins.`);
+    }
+    if (Number(member.money) < amountToPay) {
+      throw new InsufficientBalanceError(round2(amountToPay - Number(member.money)));
+    }
+
+    const newMoney = round2(Number(member.money) - amountToPay);
+    const newSc = round2(Number(member.sc) - spentSc);
+    await tx.exec('UPDATE members SET money = $1, sc = $2 WHERE id = $3', [
+      newMoney,
+      newSc,
+      memberId,
+    ]);
+
+    // A delivery order carries the saved address so the kitchen knows where it goes.
+    const orderNote = (
+      orderType === 'delivery'
+        ? `Deliver to: ${member.address.trim()}${member.phone ? ` · ${member.phone}` : ''}${
+            note ? ` — ${note}` : ''
+          }`
+        : note
+    ).slice(0, 500);
+
+    const inserted = await tx.one<{ id: number; created_at: Date }>(
+      `INSERT INTO orders
+         (member_id, status, order_type, table_number, items, subtotal, coin_discount,
+          total, coins_used, payment_method, note)
+       VALUES ($1, 'pending', $2, $3, $4::jsonb, $5, $6, $7, $8, 'wallet', $9)
+       RETURNING id, created_at`,
+      [
+        memberId,
+        orderType,
+        tableNumber,
+        JSON.stringify(detailItems),
+        total,
+        discount,
+        amountToPay,
+        spentSc,
+        orderNote,
+      ]
     );
+
+    if (spentSc > 0) {
+      await tx.exec(
+        `INSERT INTO coin_transactions (member_id, amount, reason, ref)
+         VALUES ($1, $2, 'order_discount', $3)`,
+        [memberId, -spentSc, String(inserted?.id ?? '')]
+      );
+    }
+
+    const orderId = Number(inserted?.id ?? 0);
     return {
-      orderId: Number(inserted.lastInsertRowid),
+      orderId,
+      orderNo: orderNo(orderId),
+      status: 'pending' as OrderStatus,
+      orderType,
+      tableNumber,
+      note: orderNote,
+      createdAt: toIso(inserted?.created_at),
       items: detailItems,
       total,
       discount,
@@ -947,78 +851,288 @@ export async function placeOrder(
   });
 }
 
-export async function creditReward(memberId: number, amount: number): Promise<number> {
-  return getDb().transaction(async (db) => {
-    const current = await db.get<{ balance: number }>('SELECT balance FROM Members WHERE id = ?', [memberId]);
+export interface CoinTransaction {
+  id: number;
+  amount: number;
+  reason: string;
+  ref: string;
+  createdAt: string;
+}
+
+/** The member-visible coin ledger, newest first. */
+export async function getCoinTransactions(
+  memberId: number,
+  limit = 50
+): Promise<CoinTransaction[]> {
+  const rows = await (await ready()).rows<{
+    id: number;
+    amount: number;
+    reason: string;
+    ref: string;
+    created_at: Date;
+  }>(
+    `SELECT id, amount, reason, ref, created_at
+       FROM coin_transactions
+      WHERE member_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2`,
+    [memberId, limit]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    amount: Number(row.amount),
+    reason: row.reason,
+    ref: row.ref ?? '',
+    createdAt: toIso(row.created_at),
+  }));
+}
+
+export async function creditReward(
+  memberId: number,
+  amount: number,
+  ref = ''
+): Promise<number> {
+  return transaction(async (tx) => {
+    const current = await tx.one<{ sc: number }>('SELECT sc FROM members WHERE id = $1', [memberId]);
     if (!current) throw new Error('Member not found');
-    const newBalance = current.balance + amount;
-    await db.run('UPDATE Members SET balance = ? WHERE id = ?', [newBalance, memberId]);
+    const newBalance = round2(Number(current.sc) + amount);
+    await tx.exec('UPDATE members SET sc = $1 WHERE id = $2', [newBalance, memberId]);
+    await tx.exec(
+      `INSERT INTO coin_transactions (member_id, amount, reason, ref)
+       VALUES ($1, $2, 'game_win', $3)`,
+      [memberId, amount, ref]
+    );
     return newBalance;
   });
 }
 
-export async function getTransactions(memberId: number): Promise<Invoice[]> {
-  const rows = await getDb().all<{
-    id: number;
-    timestamp: string;
-    order_details: string;
-    total: number;
-    sc_used: number;
-    items_json: string;
-  }>(
-    'SELECT id, timestamp, order_details, total, sc_used, items_json FROM Transactions WHERE member_id = ? ORDER BY timestamp DESC, id DESC',
-    [memberId]
+interface OrderRow {
+  id: number;
+  member_id: number;
+  member_name: string | null;
+  status: string;
+  order_type: string;
+  table_number: string;
+  items: unknown;
+  subtotal: number;
+  coin_discount: number;
+  total: number;
+  coins_used: number;
+  payment_method: string;
+  note: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+const ORDER_SELECT = `
+  SELECT o.id, o.member_id, o.status, o.order_type, o.table_number, o.items,
+         o.subtotal, o.coin_discount, o.total, o.coins_used, o.payment_method,
+         o.note, o.created_at, o.updated_at, m.name AS member_name
+    FROM orders o JOIN members m ON m.id = o.member_id`;
+
+function parseOrderItems(raw: unknown): OrderLine[] {
+  if (!Array.isArray(raw)) return [];
+  const valid = raw.every((item: unknown) => {
+    if (typeof item !== 'object' || item === null) return false;
+    const line = item as Record<string, unknown>;
+    return (
+      typeof line.name === 'string' &&
+      typeof line.price === 'number' &&
+      typeof line.quantity === 'number'
+    );
+  });
+  return valid ? (raw as OrderLine[]) : [];
+}
+
+function rowToOrder(row: OrderRow): Order {
+  return {
+    id: row.id,
+    orderNo: orderNo(row.id),
+    memberId: row.member_id,
+    memberName: row.member_name ?? '',
+    status: isOrderStatus(row.status) ? row.status : 'pending',
+    orderType: isOrderType(row.order_type) ? row.order_type : 'dine_in',
+    tableNumber: row.table_number ?? '',
+    items: parseOrderItems(row.items),
+    subtotal: Number(row.subtotal ?? 0),
+    coinDiscount: Number(row.coin_discount ?? 0),
+    total: Number(row.total ?? 0),
+    coinsUsed: Number(row.coins_used ?? 0),
+    paymentMethod: row.payment_method ?? 'wallet',
+    note: row.note ?? '',
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+  };
+}
+
+export async function getOrder(id: number): Promise<Order | null> {
+  const row = await (await ready()).one<OrderRow>(`${ORDER_SELECT} WHERE o.id = $1`, [id]);
+  return row ? rowToOrder(row) : null;
+}
+
+export async function getMemberOrders(memberId: number, limit = 50): Promise<Order[]> {
+  const rows = await (await ready()).rows<OrderRow>(
+    `${ORDER_SELECT} WHERE o.member_id = $1 ORDER BY o.created_at DESC, o.id DESC LIMIT $2`,
+    [memberId, limit]
   );
-  return rows.map((r) => {
-    let items: InvoiceItem[] | null = null;
-    try {
-      const parsed = JSON.parse(r.items_json || '[]');
-      if (
-        Array.isArray(parsed) &&
-        parsed.every(
-          (i: unknown) =>
-            typeof i === 'object' &&
-            i !== null &&
-            'name' in (i as Record<string, unknown>) &&
-            'price' in (i as Record<string, unknown>) &&
-            'quantity' in (i as Record<string, unknown>)
-        )
-      ) {
-        items = parsed as InvoiceItem[];
-      }
-    } catch {
-      items = null;
+  return rows.map(rowToOrder);
+}
+
+/** Orders the kitchen still has to deal with, oldest first. */
+export async function getOpenOrders(): Promise<Order[]> {
+  const rows = await (await ready()).rows<OrderRow>(
+    `${ORDER_SELECT}
+      WHERE o.status IN ('pending','preparing','ready')
+      ORDER BY o.created_at ASC, o.id ASC`
+  );
+  return rows.map(rowToOrder);
+}
+
+/** Completed / cancelled orders, newest first. */
+export async function getRecentClosedOrders(limit = 25): Promise<Order[]> {
+  const rows = await (await ready()).rows<OrderRow>(
+    `${ORDER_SELECT}
+      WHERE o.status IN ('completed','cancelled')
+      ORDER BY o.updated_at DESC, o.id DESC
+      LIMIT $1`,
+    [limit]
+  );
+  return rows.map(rowToOrder);
+}
+
+type LockedOrder = {
+  status: string;
+  member_id: number;
+  total: number;
+  coins_used: number;
+};
+
+/**
+ * Read an order for update. FOR UPDATE stops two admins (or a customer and an
+ * admin) from refunding the same order twice at the same moment.
+ */
+async function lockOrder(tx: Db, id: number): Promise<LockedOrder | undefined> {
+  return tx.one<LockedOrder>(
+    'SELECT status, member_id, total, coins_used FROM orders WHERE id = $1 FOR UPDATE',
+    [id]
+  );
+}
+
+async function readOrderTx(tx: Db, id: number): Promise<Order> {
+  const row = await tx.one<OrderRow>(`${ORDER_SELECT} WHERE o.id = $1`, [id]);
+  if (!row) throw new OrderError('Order not found.');
+  return rowToOrder(row);
+}
+
+/** Put the money and coins from a cancelled order back where they came from. */
+async function refundOrder(
+  tx: Db,
+  orderId: number,
+  total: number,
+  coinsUsed: number
+): Promise<void> {
+  if (total > 0) {
+    await tx.exec(
+      `UPDATE members SET money = money + $1
+        WHERE id = (SELECT member_id FROM orders WHERE id = $2)`,
+      [total, orderId]
+    );
+  }
+  if (coinsUsed > 0) {
+    await tx.exec(
+      `UPDATE members SET sc = sc + $1
+        WHERE id = (SELECT member_id FROM orders WHERE id = $2)`,
+      [coinsUsed, orderId]
+    );
+    await tx.exec(
+      `INSERT INTO coin_transactions (member_id, amount, reason, ref)
+       SELECT member_id, $1, 'order_refund', $3 FROM orders WHERE id = $2`,
+      [coinsUsed, orderId, String(orderId)]
+    );
+  }
+}
+
+/** Staff action: move an order along its status lifecycle. */
+export async function updateOrderStatus(id: number, next: OrderStatus): Promise<Order> {
+  return transaction(async (tx) => {
+    const current = await lockOrder(tx, id);
+    if (!current) throw new OrderError('Order not found.');
+
+    const from: OrderStatus = isOrderStatus(current.status) ? current.status : 'pending';
+    if (from === next) return readOrderTx(tx, id);
+
+    if (!canTransition(from, next)) {
+      throw new OrderError(
+        `An order that is ${ORDER_STATUS_LABEL[from].toLowerCase()} cannot be moved to ${ORDER_STATUS_LABEL[next].toLowerCase()}.`
+      );
     }
-    return {
-      id: r.id,
-      timestamp: fmtTs(r.timestamp),
-      orderDetails: r.order_details,
-      total: r.total,
-      scUsed: r.sc_used ?? 0,
-      items,
-    };
+
+    if (next === 'cancelled') {
+      await refundOrder(tx, id, Number(current.total ?? 0), Number(current.coins_used ?? 0));
+    }
+
+    await tx.exec('UPDATE orders SET status = $1, updated_at = now() WHERE id = $2', [next, id]);
+    return readOrderTx(tx, id);
   });
 }
 
-// ---- Table bookings ----
+/**
+ * Cancel an order. Customers may only cancel their own order while it is still
+ * `pending`; staff may cancel anything that is not already closed.
+ * The amount paid is refunded to the wallet and the coins are returned.
+ */
+export async function cancelOrder(
+  id: number,
+  options: { memberId?: number } = {}
+): Promise<Order> {
+  return transaction(async (tx) => {
+    const current = await lockOrder(tx, id);
+    if (!current) throw new OrderError('Order not found.');
 
-function localDateKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const byCustomer = options.memberId !== undefined;
+    if (byCustomer && current.member_id !== options.memberId) {
+      throw new OrderError('Order not found.');
+    }
+
+    const from: OrderStatus = isOrderStatus(current.status) ? current.status : 'pending';
+
+    if (from === 'cancelled') throw new OrderError('This order was already cancelled.');
+    if (from === 'completed') throw new OrderError('A completed order cannot be cancelled.');
+    if (byCustomer && from !== 'pending') {
+      throw new OrderError(
+        'The kitchen has already started this order. Please ask a staff member to cancel it.'
+      );
+    }
+
+    await refundOrder(tx, id, Number(current.total ?? 0), Number(current.coins_used ?? 0));
+    await tx.exec("UPDATE orders SET status = 'cancelled', updated_at = now() WHERE id = $1", [id]);
+    return readOrderTx(tx, id);
+  });
 }
 
-function todayKey(): string {
-  return localDateKey(new Date());
+// ---------------------------------------------------------------------------
+// Table bookings
+// ---------------------------------------------------------------------------
+
+/**
+ * The cafe's time zone, from admin settings. Every "today" and "has this slot
+ * passed" decision uses it, so a UTC server and a local customer agree.
+ */
+async function cafeTimeZone(): Promise<string> {
+  const stored = (await getSetting('timezone'))?.trim() ?? '';
+  return isValidTimeZone(stored) ? stored : DEFAULT_TIME_ZONE;
 }
 
-function maxDateKey(): string {
-  const d = new Date();
-  d.setDate(d.getDate() + MAX_BOOKING_DAYS);
-  return localDateKey(d);
+export interface BookingWindow {
+  today: string;
+  maxDate: string;
+  timeZone: string;
 }
 
-function currentTimeKey(): string {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+export async function getBookingWindow(): Promise<BookingWindow> {
+  const timeZone = await cafeTimeZone();
+  const today = dateKeyInZone(new Date(), timeZone);
+  return { today, maxDate: addDaysToDateKey(today, MAX_BOOKING_DAYS), timeZone };
 }
 
 type BookingRow = {
@@ -1031,18 +1145,9 @@ type BookingRow = {
   date: string;
   slot_id: string;
   slot_label: string;
-  created_at: string;
+  status: string;
+  created_at: Date;
 };
-
-function fmtTs(value: unknown): string {
-  if (value instanceof Date) {
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(
-      value.getHours()
-    )}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
-  }
-  return String(value ?? '');
-}
 
 function rowToBooking(row: BookingRow): BookingInvoice {
   return {
@@ -1056,13 +1161,16 @@ function rowToBooking(row: BookingRow): BookingInvoice {
     slotId: row.slot_id,
     slotLabel: row.slot_label,
     memberName: row.member_name,
-    timestamp: fmtTs(row.created_at),
+    status: row.status,
+    timestamp: toIso(row.created_at),
   };
 }
 
 export async function getTableAvailability(date: string) {
-  const rows = await getDb().all<{ slot_id: string; table_number: string }>(
-    'SELECT slot_id, table_number FROM Bookings WHERE date = ?',
+  const { today, maxDate, timeZone } = await getBookingWindow();
+  const rows = await (await ready()).rows<{ slot_id: string; table_number: string }>(
+    `SELECT slot_id, table_number FROM bookings
+      WHERE date = $1 AND status <> 'cancelled'`,
     [date]
   );
   const booked: Record<string, string[]> = {};
@@ -1070,23 +1178,23 @@ export async function getTableAvailability(date: string) {
     if (!booked[row.slot_id]) booked[row.slot_id] = [];
     booked[row.slot_id].push(row.table_number);
   }
-  const today = todayKey();
-  const now = currentTimeKey();
+  const now = timeKeyInZone(new Date(), timeZone);
   const slots = TIME_SLOTS.map((s) => ({
     id: s.id,
     label: s.label,
     disabled: date === today && SLOT_STARTS[s.id] <= now,
   }));
-  return { date, maxDate: maxDateKey(), slots, booked };
+  return { date, today, maxDate, timeZone, slots, booked };
 }
 
 export async function getMemberBookings(memberId: number): Promise<BookingInvoice[]> {
-  const rows = await getDb().all<BookingRow>(
-    `SELECT b.id, b.table_number, b.table_label, b.capacity, b.seats, b.date, b.slot_id, b.slot_label,
-            b.created_at, m.name AS member_name
-     FROM Bookings b JOIN Members m ON m.id = b.member_id
-     WHERE b.member_id = ?
-     ORDER BY b.date DESC, b.id DESC`,
+  const rows = await (await ready()).rows<BookingRow>(
+    `SELECT b.id, b.table_number, b.table_label, b.capacity, b.seats, b.date,
+            b.slot_id, b.slot_label, b.status, b.created_at,
+            m.name AS member_name
+       FROM bookings b JOIN members m ON m.id = b.member_id
+      WHERE b.member_id = $1
+      ORDER BY b.date DESC, b.id DESC`,
     [memberId]
   );
   return rows.map(rowToBooking);
@@ -1102,18 +1210,16 @@ export async function createBooking(
   const tableId = typeof params.table === 'string' ? params.table : '';
   const seats = typeof params.seats === 'number' ? Math.floor(params.seats) : NaN;
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+  if (!isValidDateKey(date)) {
     throw new BookingError('Pick a valid date.');
   }
-  const today = todayKey();
-  const maxDate = maxDateKey();
+  const { today, maxDate, timeZone } = await getBookingWindow();
   if (date < today) throw new BookingError(`You can't book a table in the past.`);
   if (date > maxDate) throw new BookingError(`Bookings are open up to ${MAX_BOOKING_DAYS} days ahead.`);
-  if (date.length !== 10) throw new BookingError('Pick a valid date.');
 
   const slot = TIME_SLOTS.find((s) => s.id === slotId);
   if (!slot) throw new BookingError('Pick a valid time slot.');
-  if (date === today && SLOT_STARTS[slotId] <= currentTimeKey()) {
+  if (date === today && SLOT_STARTS[slotId] <= timeKeyInZone(new Date(), timeZone)) {
     throw new BookingError('That time has already passed today. Pick another slot.');
   }
 
@@ -1126,84 +1232,312 @@ export async function createBooking(
     throw new BookingError(`Table ${table.label} seats only ${table.capacity} people. Pick a bigger table.`);
   }
 
-  const db = getDb();
-  const clash = await db.get<{ id: number }>(
-    'SELECT id FROM Bookings WHERE date = ? AND slot_id = ? AND table_number = ?',
-    [date, slotId, tableId]
-  );
-  if (clash) {
-    throw new BookingError(`Table ${table.label} is already booked for ${slot.label}.`);
-  }
-  const mine = await db.get<{ id: number }>(
-    'SELECT id FROM Bookings WHERE member_id = ? AND date = ? AND slot_id = ?',
-    [memberId, date, slotId]
-  );
-  if (mine) {
-    throw new BookingError('You already have a table booked at this date and time.');
-  }
+  return transaction(async (tx) => {
+    const mine = await tx.one<{ id: number }>(
+      `SELECT id FROM bookings
+        WHERE member_id = $1 AND date = $2 AND slot_id = $3 AND status <> 'cancelled'`,
+      [memberId, date, slotId]
+    );
+    if (mine) {
+      throw new BookingError('You already have a table booked at this date and time.');
+    }
 
-  const inserted = await db.run(
-    'INSERT INTO Bookings (member_id, table_number, table_label, capacity, seats, date, slot_id, slot_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [memberId, table.id, table.label, table.capacity, seats, date, slot.id, slot.label]
-  );
-  const row = await db.get<BookingRow>(
-    `SELECT b.id, b.table_number, b.table_label, b.capacity, b.seats, b.date, b.slot_id, b.slot_label,
-            b.created_at, ? AS member_name
-     FROM Bookings b WHERE b.id = ?`,
-    [memberName, Number(inserted.lastInsertRowid)]
-  );
-  return rowToBooking(row as BookingRow);
+    let inserted: { id: number } | undefined;
+    try {
+      inserted = await tx.one<{ id: number }>(
+        `INSERT INTO bookings
+           (member_id, table_number, table_label, capacity, seats, date, slot_id, slot_label, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'confirmed')
+         RETURNING id`,
+        [memberId, table.id, table.label, table.capacity, seats, date, slot.id, slot.label]
+      );
+    } catch (error) {
+      // The unique index stopped two people grabbing the same table at once.
+      if (isUniqueViolation(error)) {
+        throw new BookingError(`Table ${table.label} is already booked for ${slot.label}.`);
+      }
+      throw error;
+    }
+
+    const row = await tx.one<BookingRow>(
+      `SELECT b.id, b.table_number, b.table_label, b.capacity, b.seats, b.date,
+              b.slot_id, b.slot_label, b.status, b.created_at, $2::text AS member_name
+         FROM bookings b WHERE b.id = $1`,
+      [Number(inserted?.id ?? 0), memberName]
+    );
+    if (!row) {
+      throw new BookingError('Could not save the booking. Please try again.');
+    }
+    return rowToBooking(row);
+  });
 }
 
-// ---- Menu items ----
+const BOOKING_SELECT = `
+  SELECT b.id, b.table_number, b.table_label, b.capacity, b.seats, b.date,
+         b.slot_id, b.slot_label, b.status, b.created_at,
+         m.name AS member_name
+    FROM bookings b JOIN members m ON m.id = b.member_id`;
 
-function rowToMenuItem(row: {
+async function readBookingRow(id: number): Promise<BookingRow | undefined> {
+  return (await ready()).one<BookingRow>(`${BOOKING_SELECT} WHERE b.id = $1`, [id]);
+}
+
+/** Every booking that has not been cancelled, from today to the open window. */
+export async function getUpcomingBookings(): Promise<BookingInvoice[]> {
+  const { today, maxDate } = await getBookingWindow();
+  const rows = await (await ready()).rows<BookingRow>(
+    `${BOOKING_SELECT}
+      WHERE b.status <> 'cancelled' AND b.date >= $1 AND b.date <= $2
+      ORDER BY b.date, b.id`,
+    [today, maxDate]
+  );
+  const slotOrder = new Map(TIME_SLOTS.map((slot, index) => [slot.id, index]));
+  return rows
+    .map(rowToBooking)
+    .sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) ||
+        (slotOrder.get(a.slotId) ?? 0) - (slotOrder.get(b.slotId) ?? 0) ||
+        a.tableLabel.localeCompare(b.tableLabel)
+    );
+}
+
+/** Today's reservations, in the order they will arrive. */
+export interface TodayBookings {
+  date: string;
+  bookings: BookingInvoice[];
+  seats: number;
+}
+
+export async function getTodayBookings(): Promise<TodayBookings> {
+  const { today } = await getBookingWindow();
+  const rows = await (await ready()).rows<BookingRow>(
+    `${BOOKING_SELECT}
+      WHERE b.status <> 'cancelled' AND b.date = $1
+      ORDER BY b.id`,
+    [today]
+  );
+  const slotOrder = new Map(TIME_SLOTS.map((slot, index) => [slot.id, index]));
+  const bookings = rows
+    .map(rowToBooking)
+    .sort(
+      (a, b) =>
+        (slotOrder.get(a.slotId) ?? 0) - (slotOrder.get(b.slotId) ?? 0) ||
+        a.tableLabel.localeCompare(b.tableLabel)
+    );
+  return {
+    date: today,
+    bookings,
+    seats: bookings.reduce((sum, booking) => sum + booking.seats, 0),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Admin: sales reports
+// ---------------------------------------------------------------------------
+
+export interface SalesSummary {
+  date: string;
+  orders: number;
+  gross: number;
+  collected: number;
+  coinDiscount: number;
+  coinsUsed: number;
+  averageTicket: number;
+}
+
+export interface BestSeller {
+  name: string;
+  quantity: number;
+  revenue: number;
+}
+
+export interface DailySales {
+  date: string;
+  orders: number;
+  collected: number;
+}
+
+export interface SalesReport {
+  timeZone: string;
+  today: SalesSummary;
+  bestSellers: BestSeller[];
+  last7Days: DailySales[];
+}
+
+/**
+ * Sales started "today" in the cafe's time zone. Cancelled orders are left out:
+ * they were refunded, so counting them would overstate the day.
+ *
+ * The day boundary is calculated inside Postgres with the configured IANA zone,
+ * which handles days that are not exactly 24 hours long.
+ */
+export async function getSalesReport(): Promise<SalesReport> {
+  const d = await ready();
+  const { today, timeZone } = await getBookingWindow();
+  const start = addDaysToDateKey(today, -6);
+
+  const summary = await d.one<{
+    orders: number;
+    gross: number;
+    collected: number;
+    coin_discount: number;
+    coins_used: number;
+  }>(
+    `SELECT count(*)::int AS orders,
+            COALESCE(SUM(subtotal), 0) AS gross,
+            COALESCE(SUM(total), 0) AS collected,
+            COALESCE(SUM(coin_discount), 0) AS coin_discount,
+            COALESCE(SUM(coins_used), 0) AS coins_used
+       FROM orders
+      WHERE status <> 'cancelled'
+        AND created_at >= ($1::date::timestamp AT TIME ZONE $2)
+        AND created_at <  (($1::date + 1)::timestamp AT TIME ZONE $2)`,
+    [today, timeZone]
+  );
+
+  const bestSellers = await d.rows<{ name: string; quantity: number; revenue: number }>(
+    `SELECT item->>'name' AS name,
+            SUM((item->>'quantity')::numeric)::int AS quantity,
+            SUM(((item->>'quantity')::numeric) * ((item->>'price')::numeric)) AS revenue
+       FROM orders o
+       CROSS JOIN LATERAL jsonb_array_elements(
+         CASE WHEN jsonb_typeof(o.items) = 'array' THEN o.items ELSE '[]'::jsonb END
+       ) AS item
+      WHERE o.status <> 'cancelled'
+        AND jsonb_typeof(item) = 'object'
+        AND item ? 'name' AND item ? 'quantity' AND item ? 'price'
+        AND o.created_at >= ($1::date::timestamp AT TIME ZONE $2)
+        AND o.created_at <  (($1::date + 1)::timestamp AT TIME ZONE $2)
+      GROUP BY 1
+      ORDER BY quantity DESC, revenue DESC
+      LIMIT 8`,
+    [today, timeZone]
+  );
+
+  const daily = await d.rows<{ day: string; orders: number; collected: number }>(
+    `SELECT to_char((created_at AT TIME ZONE $2)::date, 'YYYY-MM-DD') AS day,
+            count(*)::int AS orders,
+            COALESCE(SUM(total), 0) AS collected
+       FROM orders
+      WHERE status <> 'cancelled'
+        AND created_at >= ($1::date::timestamp AT TIME ZONE $2)
+        AND created_at <  (($3::date + 1)::timestamp AT TIME ZONE $2)
+      GROUP BY 1`,
+    [start, timeZone, today]
+  );
+  const byDay = new Map(daily.map((row) => [row.day, row]));
+
+  const orders = Number(summary?.orders ?? 0);
+  const gross = Number(summary?.gross ?? 0);
+  return {
+    timeZone,
+    today: {
+      date: today,
+      orders,
+      gross,
+      collected: Number(summary?.collected ?? 0),
+      coinDiscount: Number(summary?.coin_discount ?? 0),
+      coinsUsed: Number(summary?.coins_used ?? 0),
+      averageTicket: orders > 0 ? round2(gross / orders) : 0,
+    },
+    bestSellers: bestSellers.map((row) => ({
+      name: row.name,
+      quantity: Number(row.quantity ?? 0),
+      revenue: Number(row.revenue ?? 0),
+    })),
+    last7Days: Array.from({ length: 7 }, (_, index) => {
+      const date = addDaysToDateKey(start, index);
+      const row = byDay.get(date);
+      return {
+        date,
+        orders: Number(row?.orders ?? 0),
+        collected: Number(row?.collected ?? 0),
+      };
+    }),
+  };
+}
+
+
+export async function cancelBooking(id: number): Promise<BookingInvoice> {
+  const existing = await readBookingRow(id);
+  if (!existing) throw new BookingError('Booking not found.');
+  if (existing.status === 'cancelled') {
+    throw new BookingError('That booking is already cancelled.');
+  }
+
+  await (await ready()).exec(
+    "UPDATE bookings SET status = 'cancelled' WHERE id = $1",
+    [id]
+  );
+
+  const updated = await readBookingRow(id);
+  if (!updated) throw new BookingError('Booking not found.');
+  return rowToBooking(updated);
+}
+
+// ---------------------------------------------------------------------------
+// Menu items
+// ---------------------------------------------------------------------------
+
+interface MenuItemRow {
   id: number;
   name: string;
   price: number;
   category: string;
   image: string;
-  active: number;
-}): MenuItem {
+  active: boolean;
+}
+
+function rowToMenuItem(row: MenuItemRow): MenuItem {
   return {
     id: row.id,
     name: row.name,
-    price: row.price,
+    price: Number(row.price),
     category: row.category,
     image: row.image ?? '',
-    active: row.active === 1,
+    active: Boolean(row.active),
   };
 }
 
+const MENU_COLUMNS = 'id, name, price, category, image, active';
+
 export async function listMenuItems(): Promise<MenuItem[]> {
-  const rows = await getDb().all<{
-    id: number;
-    name: string;
-    price: number;
-    category: string;
-    image: string;
-    active: number;
-  }>('SELECT id, name, price, category, image, active FROM MenuItems ORDER BY category, name');
+  const rows = await (await ready()).rows<MenuItemRow>(
+    `SELECT ${MENU_COLUMNS} FROM menu_items ORDER BY category, name`
+  );
   return rows.map(rowToMenuItem);
 }
 
 export async function getActiveMenuItems(): Promise<MenuItem[]> {
-  return (await listMenuItems()).filter((item) => item.active);
+  const rows = await (await ready()).rows<MenuItemRow>(
+    `SELECT ${MENU_COLUMNS} FROM menu_items WHERE active = true ORDER BY category, name`
+  );
+  return rows.map(rowToMenuItem);
 }
 
 export async function getMenuItemByName(name: string): Promise<MenuItem | null> {
-  const row = await getDb().get<{
-    id: number;
-    name: string;
-    price: number;
-    category: string;
-    image: string;
-    active: number;
-  }>('SELECT id, name, price, category, image, active FROM MenuItems WHERE name = ?', [name]);
+  const row = await (await ready()).one<MenuItemRow>(
+    `SELECT ${MENU_COLUMNS} FROM menu_items WHERE name = $1`,
+    [name]
+  );
   return row ? rowToMenuItem(row) : null;
 }
 
-export async function createMenuItem(data: { name: string; price: number; category: string; image?: string }): Promise<MenuItem> {
+export async function getMenuItemById(id: number): Promise<MenuItem | null> {
+  const row = await (await ready()).one<MenuItemRow>(
+    `SELECT ${MENU_COLUMNS} FROM menu_items WHERE id = $1`,
+    [id]
+  );
+  return row ? rowToMenuItem(row) : null;
+}
+
+export async function createMenuItem(data: {
+  name: string;
+  price: number;
+  category: string;
+  image?: string;
+}): Promise<MenuItem> {
   const name = data.name.trim();
   const price = Number(data.price);
   const category = data.category.trim() || 'General';
@@ -1225,13 +1559,11 @@ export async function createMenuItem(data: { name: string; price: number; catego
     throw new MenuItemError(`An item named "${name}" already exists.`);
   }
 
-  const result = await getDb().run('INSERT INTO MenuItems (name, price, category, image) VALUES (?, ?, ?, ?)', [
-    name,
-    price,
-    category,
-    image,
-  ]);
-  return { id: Number(result.lastInsertRowid), name, price, category, image, active: true };
+  const row = await (await ready()).one<{ id: number }>(
+    'INSERT INTO menu_items (name, price, category, image) VALUES ($1, $2, $3, $4) RETURNING id',
+    [name, price, category, image]
+  );
+  return { id: Number(row?.id ?? 0), name, price, category, image, active: true };
 }
 
 export async function updateMenuItem(
@@ -1267,76 +1599,195 @@ export async function updateMenuItem(
     throw new MenuItemError(`An item named "${next.name}" already exists.`);
   }
 
-  await getDb().run('UPDATE MenuItems SET name = ?, price = ?, category = ?, image = ?, active = ? WHERE id = ?', [
-    next.name,
-    next.price,
-    next.category,
-    next.image,
-    next.active ? 1 : 0,
-    id,
-  ]);
+  await (await ready()).exec(
+    'UPDATE menu_items SET name = $1, price = $2, category = $3, image = $4, active = $5 WHERE id = $6',
+    [next.name, next.price, next.category, next.image, next.active, id]
+  );
   return getMenuItemById(id);
 }
 
 export async function deleteMenuItem(id: number): Promise<boolean> {
-  const result = await getDb().run('DELETE FROM MenuItems WHERE id = ?', [id]);
-  return Number(result.changes) > 0;
+  const changes = await (await ready()).exec('DELETE FROM menu_items WHERE id = $1', [id]);
+  return changes > 0;
 }
 
-export async function getMenuItemById(id: number): Promise<MenuItem | null> {
-  const row = await getDb().get<{
-    id: number;
-    name: string;
-    price: number;
-    category: string;
-    image: string;
-    active: number;
-  }>('SELECT id, name, price, category, image, active FROM MenuItems WHERE id = ?', [id]);
-  return row ? rowToMenuItem(row) : null;
+// ---------------------------------------------------------------------------
+// Game turn limits
+// ---------------------------------------------------------------------------
+
+interface GameLimitState {
+  allowed: boolean;
+  cooldown: boolean;
+  retryAfterMs: number | null;
+  attemptsLeft: number;
 }
 
-// ---- Game sessions ----
+async function readGameLimit(
+  memberId: number,
+  game: string
+): Promise<{ plays: number; cooldown_until: number }> {
+  const row = await (await ready()).one<{ plays: number; cooldown_until: number }>(
+    'SELECT plays, cooldown_until FROM game_limits WHERE member_id = $1 AND game = $2',
+    [memberId, game]
+  );
+  return { plays: Number(row?.plays ?? 0), cooldown_until: Number(row?.cooldown_until ?? 0) };
+}
 
-export async function createGameSession(memberId: number, game: string, secret?: number): Promise<GameSession> {
-  const result = await getDb().run('INSERT INTO GameSessions (member_id, game, secret) VALUES (?, ?, ?)', [
-    memberId,
-    game,
-    secret ?? null,
-  ]);
+async function writeGameLimit(
+  memberId: number,
+  game: string,
+  plays: number,
+  cooldownUntil: number
+): Promise<void> {
+  await (await ready()).exec(
+    `INSERT INTO game_limits (member_id, game, plays, cooldown_until)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (member_id, game) DO UPDATE
+       SET plays = excluded.plays, cooldown_until = excluded.cooldown_until`,
+    [memberId, game, plays, cooldownUntil]
+  );
+}
+
+function gameLimitState(plays: number, cooldownUntil: number, now: number): GameLimitState {
+  if (cooldownUntil > now) {
+    return { allowed: false, cooldown: true, retryAfterMs: cooldownUntil, attemptsLeft: 0 };
+  }
+  return { allowed: true, cooldown: false, retryAfterMs: null, attemptsLeft: MAX_GAME_TURNS - plays };
+}
+
+/** Read-only view of how many turns a member has left (does not consume a turn). */
+export async function getGameState(memberId: number, game: string): Promise<GameLimitState> {
+  const { plays, cooldown_until } = await readGameLimit(memberId, game);
+  return gameLimitState(plays, cooldown_until, Date.now());
+}
+
+/**
+ * Record the outcome of one game session.
+ * - Losing consumes one of the daily tries; the 3rd loss starts a 24h cooldown.
+ * - Winning starts the 24h cooldown immediately, even on the 1st or 2nd try.
+ */
+export async function recordGameOutcome(
+  memberId: number,
+  game: string,
+  won: boolean
+): Promise<GameLimitState> {
+  const now = Date.now();
+  const { plays, cooldown_until } = await readGameLimit(memberId, game);
+  if (cooldown_until > now) {
+    return gameLimitState(plays, cooldown_until, now);
+  }
+
+  if (won) {
+    await writeGameLimit(memberId, game, 0, now + GAME_COOLDOWN_MS);
+    return { allowed: false, cooldown: true, retryAfterMs: now + GAME_COOLDOWN_MS, attemptsLeft: 0 };
+  }
+
+  if (plays + 1 >= MAX_GAME_TURNS) {
+    await writeGameLimit(memberId, game, 0, now + GAME_COOLDOWN_MS);
+    return { allowed: false, cooldown: true, retryAfterMs: now + GAME_COOLDOWN_MS, attemptsLeft: 0 };
+  }
+
+  await writeGameLimit(memberId, game, plays + 1, 0);
+  return { allowed: true, cooldown: false, retryAfterMs: null, attemptsLeft: MAX_GAME_TURNS - (plays + 1) };
+}
+
+// ---------------------------------------------------------------------------
+// Game sessions
+// ---------------------------------------------------------------------------
+
+export async function createGameSession(
+  memberId: number,
+  game: string,
+  secret?: number,
+  board = ''
+): Promise<GameSession> {
+  // Retire any live game first: the partial unique index allows only one
+  // active session per member per game.
+  const id = await transaction(async (tx) => {
+    await tx.exec(
+      `UPDATE game_sessions SET status = 'abandoned'
+        WHERE member_id = $1 AND game = $2 AND status = 'active'`,
+      [memberId, game]
+    );
+    const row = await tx.one<{ id: number }>(
+      'INSERT INTO game_sessions (member_id, game, secret, board) VALUES ($1, $2, $3, $4) RETURNING id',
+      [memberId, game, secret ?? null, board]
+    );
+    return Number(row?.id ?? 0);
+  });
   return {
-    id: Number(result.lastInsertRowid),
+    id,
     member_id: memberId,
     game,
     secret: secret ?? null,
+    board,
     moves: 0,
     status: 'active',
   };
 }
 
-export async function getGameSession(id: number): Promise<GameSession | null> {
-  const row = await getDb().get<{
-    id: number;
-    member_id: number;
-    game: string;
-    secret: number | null;
-    moves: number;
-    status: string;
-  }>('SELECT id, member_id, game, secret, moves, status FROM GameSessions WHERE id = ?', [id]);
-  if (!row) return null;
+interface GameSessionRow {
+  id: number;
+  member_id: number;
+  game: string;
+  secret: number | null;
+  board: string;
+  moves: number;
+  status: string;
+}
+
+function rowToGameSession(row: GameSessionRow): GameSession {
   return {
     id: row.id,
     member_id: row.member_id,
     game: row.game,
     secret: row.secret,
-    moves: row.moves,
+    board: row.board ?? '',
+    moves: Number(row.moves ?? 0),
     status: row.status,
   };
 }
 
-export async function updateSessionMoves(id: number, moves: number): Promise<void> {
-  await getDb().run('UPDATE GameSessions SET moves = ? WHERE id = ?', [moves, id]);
+const GAME_SESSION_COLUMNS = 'id, member_id, game, secret, board, moves, status';
+
+export async function getGameSession(id: number): Promise<GameSession | null> {
+  const row = await (await ready()).one<GameSessionRow>(
+    `SELECT ${GAME_SESSION_COLUMNS} FROM game_sessions WHERE id = $1`,
+    [id]
+  );
+  return row ? rowToGameSession(row) : null;
 }
 
-export async function finishGameSession(id: number, status: 'won' | 'lost' | 'abandoned'): Promise<void> {
-  await getDb().run('UPDATE GameSessions SET status = ? WHERE id = ?', [status, id]);
+/** The single live session a member may have for one game, if any. */
+export async function getActiveGameSession(
+  memberId: number,
+  game: string
+): Promise<GameSession | null> {
+  const row = await (await ready()).one<GameSessionRow>(
+    `SELECT ${GAME_SESSION_COLUMNS}
+       FROM game_sessions
+      WHERE member_id = $1 AND game = $2 AND status = 'active'
+      ORDER BY id DESC
+      LIMIT 1`,
+    [memberId, game]
+  );
+  return row ? rowToGameSession(row) : null;
+}
+
+export async function updateSessionMoves(id: number, moves: number): Promise<void> {
+  await (await ready()).exec('UPDATE game_sessions SET moves = $1 WHERE id = $2', [moves, id]);
+}
+
+export async function updateSessionBoard(id: number, board: string, moves: number): Promise<void> {
+  await (await ready()).exec(
+    'UPDATE game_sessions SET board = $1, moves = $2 WHERE id = $3',
+    [board, moves, id]
+  );
+}
+
+export async function finishGameSession(
+  id: number,
+  status: 'won' | 'lost' | 'draw' | 'abandoned'
+): Promise<void> {
+  await (await ready()).exec('UPDATE game_sessions SET status = $1 WHERE id = $2', [status, id]);
 }

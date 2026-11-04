@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 };
 
 export default async function GamesPage() {
-  const member = await requireMember();
+  const member = await requireMember('/games');
   const settings = await getStoreSettings();
 
   const games = [

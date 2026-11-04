@@ -3,16 +3,23 @@
   "version": "1.0.0",
   "private": true,
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=20"
   },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "db:setup": "node scripts/db-setup.mjs",
+    "db:reset": "node scripts/db-setup.mjs --reset",
+    "seed:demo": "node scripts/seed-demo.mjs",
+    "check:db": "node scripts/check-db.mjs",
+    "check:static": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/static-check.ps1"
   },
   "dependencies": {
+    "@types/qrcode": "^1.5.6",
     "next": "^15.1.6",
     "pg": "^8.23.0",
+    "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "server-only": "^0.0.1"

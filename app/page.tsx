@@ -11,34 +11,6 @@ export const dynamic = 'force-dynamic';
 const HERO_IMAGE = 'https://images.unsplash.com/photo-1554118811-1e0d58224f24?w=1600&q=80';
 const ABOUT_IMAGE = 'https://images.unsplash.com/photo-1445116572660-236099ec97a0?w=800&q=80';
 
-const REVIEWS = [
-  {
-    name: 'Ananya S.',
-    text: 'The Venom Smoothie is honestly the best thing I’ve had this year. I ordered, played a quick game while waiting, and my coffee was already up.',
-    rating: 5,
-  },
-  {
-    name: 'Rahul M.',
-    text: 'Came for the menu, stayed for the games. Won enough Snake Coins to get my whole order discounted. This place is dangerously fun.',
-    rating: 5,
-  },
-  {
-    name: 'Priya K.',
-    text: 'Booked a table for dinner on a busy Saturday and it was ready in a minute. The staff remembered our names the second visit.',
-    rating: 5,
-  },
-  {
-    name: 'Dev A.',
-    text: 'A coffee shop where your loyalty is actually rewarded. 100 coins off a rupee and a wallet on tap. Genuinely clever.',
-    rating: 4,
-  },
-  {
-    name: 'Meera D.',
-    text: 'The Cobra Burger and a quick round of Tic Tac Toe? My new Friday ritual. Cozy corner tables too.',
-    rating: 5,
-  },
-];
-
 export const metadata: Metadata = {
   title: 'Cafe with a bite',
   description:
@@ -57,6 +29,7 @@ export default async function LandingPage() {
         currencyName={settings.currencyName}
         currencySymbol={settings.currencySymbol}
         member={member}
+        signedIn={!!member}
       />
 
       <section className="landing-hero">
@@ -163,36 +136,10 @@ export default async function LandingPage() {
         </div>
       </section>
 
-      <section className="landing-section">
-        <div className="container">
-          <Reveal>
-            <div className="landing-head">
-              <span className="section-index">03</span>
-              <h2>What our regulars say</h2>
-              <p className="subtitle">Unsponsored, unedited, and definitely returning for more.</p>
-            </div>
-          </Reveal>
-          <div className="reviews-grid">
-            {REVIEWS.map((review, i) => (
-              <Reveal key={review.name} delay={i * 70}>
-                <div className="review-card">
-                  <div className="stars" aria-label={`${review.rating} out of 5 stars`}>
-                    {'★'.repeat(review.rating)}
-                    <span className="stars-empty">{'★'.repeat(5 - review.rating)}</span>
-                  </div>
-                  <p className="review-text">“{review.text}”</p>
-                  <span className="review-name">— {review.name}</span>
-                </div>
-              </Reveal>
-            ))}
-          </div>
-        </div>
-      </section>
-
       <section className="landing-cta">
         <div className="container">
           <Reveal>
-            <span className="section-index section-index-center">04</span>
+            <span className="section-index section-index-center">03</span>
             <h2>Your table’s waiting.</h2>
             <p className="landing-hero-sub">
               Sign up now and we’ll drop ₹20 in your wallet to get you started.
@@ -233,11 +180,11 @@ export default async function LandingPage() {
               <span>₹1 off per 100 {currency}</span>
             </div>
             <div className="landing-footer-col">
-              <h4>Contact</h4>
-              <span>12, Market Lane, Sector 14, Gurugram</span>
-              <span>+91 98000 12345</span>
-              <span>hello@snakecafe.in</span>
-              <span>Open every day · 8 AM – 11 PM</span>
+              <h4>Good to know</h4>
+              <span>Order at the table or counter</span>
+              <span>Reservations up to 14 days ahead</span>
+              <span>Walk-ins welcome</span>
+              <Link href="/privacy">Privacy policy</Link>
             </div>
           </div>
           <div className="landing-footer-bottom">
@@ -245,17 +192,9 @@ export default async function LandingPage() {
               © {new Date().getFullYear()} {settings.storeName}. All rights reserved.
             </span>
             <div className="landing-social">
-              <a href="https://instagram.com/" target="_blank" rel="noreferrer">
-                Instagram
-              </a>
-              <a href="https://facebook.com/" target="_blank" rel="noreferrer">
-                Facebook
-              </a>
-              <a href="https://x.com/" target="_blank" rel="noreferrer">
-                X
-              </a>
+              <Link href="/privacy">Privacy</Link>
               <Link href="/admin" className="landing-admin-link">
-                Admin
+                Staff login
               </Link>
             </div>
           </div>

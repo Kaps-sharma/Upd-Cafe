@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { isAdminSession } from '@/lib/auth';
-import { passcodeMatches, setAdminPasscode } from '@/lib/db';
+import { clearAdminFailures, passcodeMatches, setAdminPasscode } from '@/lib/db';
 
 export const runtime = 'nodejs';
 
@@ -24,5 +24,6 @@ export async function PUT(req: NextRequest) {
   }
 
   await setAdminPasscode(next);
+  await clearAdminFailures();
   return NextResponse.json({ ok: true });
 }

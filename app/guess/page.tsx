@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 };
 
 export default async function GuessPage() {
-  const member = await requireMember();
+  const member = await requireMember('/guess');
   const settings = await getStoreSettings();
 
   return (

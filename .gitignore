@@ -5,11 +5,11 @@
 /.next
 /out
 
-# Database files (created at runtime in data/)
-/data/*.db
-/data/*.db-journal
-/data/*.db-wal
-/data/*.db-shm
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# The database lives in Supabase Postgres, not in the repo.
+# See supabase/schema.sql to (re)create the tables.
 
 # Logs
 *.log

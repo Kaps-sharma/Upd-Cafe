@@ -1,9 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthMember } from '@/lib/auth';
-import { creditReward, getStoreSettings, getGameState, recordGameOutcome } from '@/lib/db';
-import { isValidTicTacToeOutcome, randomGameReward } from '@/lib/games';
+import {
+  creditReward,
+  getStoreSettings,
+  getGameState,
+  getActiveGameSession,
+  createGameSession,
+  updateSessionBoard,
+  finishGameSession,
+  recordGameOutcome,
+} from '@/lib/db';
+import { botMove, checkWin, randomGameReward } from '@/lib/games';
 
 export const runtime = 'nodejs';
+
+type Cell = 'X' | 'O' | ' ';
+const EMPTY_BOARD = '         ';
+
+function parseBoard(raw: string): Cell[] {
+  return raw
+    .padEnd(9, ' ')
+    .slice(0, 9)
+    .split('')
+    .map((cell) => (cell === 'X' || cell === 'O' ? cell : ' ')) as Cell[];
+}
 
 export async function GET() {
   const member = await getAuthMember();
@@ -19,6 +39,11 @@ export async function GET() {
   });
 }
 
+/**
+ * The board is owned by the server: the browser sends only the square the
+ * member wants, and the reply contains the board after the bot has answered.
+ * A client can therefore never claim a win it did not play.
+ */
 export async function POST(req: NextRequest) {
   const member = await getAuthMember();
   if (!member) {
@@ -26,49 +51,84 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json().catch(() => null);
-  const board = body?.board as unknown;
-  const outcome = body?.outcome as 'win' | 'lose' | 'draw';
-  if (
-    outcome !== 'win' &&
-    outcome !== 'lose' &&
-    outcome !== 'draw'
-  ) {
-    return NextResponse.json({ error: 'Invalid outcome.' }, { status: 400 });
-  }
-  if (!Array.isArray(board) || !isValidTicTacToeOutcome(board, outcome)) {
-    return NextResponse.json({ error: 'Invalid board.' }, { status: 400 });
+  const cell = Number(body?.cell);
+  if (!Number.isInteger(cell) || cell < 0 || cell > 8) {
+    return NextResponse.json({ error: 'Pick a square on the board.' }, { status: 400 });
   }
 
   const before = await getGameState(member.id, 'tictactoe');
   if (!before.allowed) {
     return NextResponse.json(
-      { error: `No turns left. Try again later.`, retryAfterMs: before.retryAfterMs, attemptsLeft: 0, cooldown: true },
+      {
+        error: 'No turns left. Try again later.',
+        retryAfterMs: before.retryAfterMs,
+        attemptsLeft: 0,
+        cooldown: true,
+      },
       { status: 429 }
     );
   }
 
-  const settings = await getStoreSettings();
-  if (outcome !== 'win') {
-    const after = await recordGameOutcome(member.id, 'tictactoe', false);
+  let session = await getActiveGameSession(member.id, 'tictactoe');
+  if (!session) {
+    session = await createGameSession(member.id, 'tictactoe', undefined, EMPTY_BOARD);
+  }
+
+  const board = parseBoard(session.board);
+  if (board[cell] !== ' ') {
+    return NextResponse.json(
+      { error: 'That square is already taken.', board: board.join('') },
+      { status: 409 }
+    );
+  }
+
+  board[cell] = 'X';
+  let result: 'active' | 'win' | 'lose' | 'draw' = 'active';
+
+  if (checkWin(board, 'X')) {
+    result = 'win';
+  } else if (!board.includes(' ')) {
+    result = 'draw';
+  } else {
+    const botIndex = botMove(board);
+    if (botIndex !== null) board[botIndex] = 'O';
+    if (checkWin(board, 'O')) result = 'lose';
+    else if (!board.includes(' ')) result = 'draw';
+  }
+
+  await updateSessionBoard(session.id, board.join(''), session.moves + 1);
+
+  if (result === 'active') {
     return NextResponse.json({
-      outcome,
-      attemptsLeft: after.attemptsLeft,
-      retryAfterMs: after.retryAfterMs,
-      cooldown: after.cooldown,
-      currencySymbol: settings.currencySymbol,
+      board: board.join(''),
+      result,
+      attemptsLeft: before.attemptsLeft,
     });
   }
 
-  const reward = randomGameReward();
-  const balance = await creditReward(member.id, reward);
-  const after = await recordGameOutcome(member.id, 'tictactoe', true);
+  await finishGameSession(
+    session.id,
+    result === 'win' ? 'won' : result === 'lose' ? 'lost' : 'draw'
+  );
+
+  const settings = await getStoreSettings();
+  const state = await recordGameOutcome(member.id, 'tictactoe', result === 'win');
+
+  let reward = 0;
+  let balance: number | null = null;
+  if (result === 'win') {
+    reward = randomGameReward();
+    balance = await creditReward(member.id, reward, 'tictactoe');
+  }
+
   return NextResponse.json({
-    outcome,
+    board: board.join(''),
+    result,
     reward,
     balance,
-    attemptsLeft: after.attemptsLeft,
-    retryAfterMs: after.retryAfterMs,
-    cooldown: after.cooldown,
+    attemptsLeft: state.attemptsLeft,
+    retryAfterMs: state.retryAfterMs,
+    cooldown: state.cooldown,
     currencySymbol: settings.currencySymbol,
   });
 }

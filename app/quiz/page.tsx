@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 };
 
 export default async function QuizPage() {
-  const member = await requireMember();
+  const member = await requireMember('/quiz');
   const settings = await getStoreSettings();
 
   return (

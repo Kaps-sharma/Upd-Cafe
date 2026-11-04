@@ -22,9 +22,17 @@ export const TABLES: TableDef[] = [
   { id: 'T5', label: 'T5', capacity: 6, row: 2 },
   { id: 'T6', label: 'T6', capacity: 4, row: 3 },
   { id: 'T7', label: 'T7', capacity: 6, row: 3 },
-  { id: 'B1', label: 'Bar ', capacity: 1, row: 4 },
-  { id: 'B2', label: 'Bar ', capacity: 1, row: 4 },
+  { id: 'B1', label: 'Bar 1', capacity: 1, row: 4 },
+  { id: 'B2', label: 'Bar 2', capacity: 1, row: 4 },
 ];
+
+/** Look up a table by the id printed on its QR code (case-insensitive). */
+export function findTable(id: string | null | undefined): TableDef | null {
+  if (!id) return null;
+  const clean = id.trim().toLowerCase();
+  if (!clean) return null;
+  return TABLES.find((table) => table.id.toLowerCase() === clean) ?? null;
+}
 
 export const SLOT_STARTS: Record<string, string> = {
   lunch1: '12:00',

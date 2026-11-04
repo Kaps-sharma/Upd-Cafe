@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server';
 import { getAuthMember } from '@/lib/auth';
-import { createGameSession, getStoreSettings, getGameState } from '@/lib/db';
+import {
+  createGameSession,
+  getStoreSettings,
+  getGameState,
+  getActiveGameSession,
+} from '@/lib/db';
 
 export const runtime = 'nodejs';
 
@@ -18,13 +23,27 @@ export async function POST() {
     );
   }
 
+  const settings = await getStoreSettings();
+
+  // One live game per member: reopening the page continues the same number
+  // instead of rolling a fresh secret, so the 10 attempts cannot be reset.
+  const existing = await getActiveGameSession(member.id, 'guess');
+  if (existing) {
+    return NextResponse.json({
+      gameId: existing.id,
+      attemptsLeft: state.attemptsLeft,
+      currencySymbol: settings.currencySymbol,
+      resumed: true,
+    });
+  }
+
   const secret = Math.floor(Math.random() * 100) + 1;
   const session = await createGameSession(member.id, 'guess', secret);
-  const settings = await getStoreSettings();
   return NextResponse.json({
     gameId: session.id,
     attemptsLeft: state.attemptsLeft,
     currencySymbol: settings.currencySymbol,
+    resumed: false,
   });
 }
 

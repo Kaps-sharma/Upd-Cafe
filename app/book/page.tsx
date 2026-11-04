@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { requireMember } from '@/lib/auth';
-import { getStoreSettings } from '@/lib/db';
+import { getBookingWindow, getStoreSettings } from '@/lib/db';
 import Header from '@/components/Header';
 import TableBooking from '@/components/TableBooking';
 
@@ -12,8 +12,9 @@ export const metadata: Metadata = {
 };
 
 export default async function BookPage() {
-  const member = await requireMember();
+  const member = await requireMember('/book');
   const settings = await getStoreSettings();
+  const window = await getBookingWindow();
 
   return (
     <main>
@@ -23,7 +24,13 @@ export default async function BookPage() {
         currencySymbol={settings.currencySymbol}
         member={member}
       />
-      <TableBooking storeName={settings.storeName} member={{ name: member.name }} />
+      <TableBooking
+        storeName={settings.storeName}
+        member={{ name: member.name }}
+        today={window.today}
+        maxDate={window.maxDate}
+        timeZone={window.timeZone}
+      />
     </main>
   );
 }

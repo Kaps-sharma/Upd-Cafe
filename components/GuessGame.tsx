@@ -98,7 +98,9 @@ export default function GuessGame({ currencySymbol = DEFAULT_CURRENCY_SYMBOL }: 
     }
   };
 
-  const canPlayAgain = attemptsLeft !== null && attemptsLeft > 0;
+  // Before the first game we have not loaded the allowance yet, so treat it as
+  // playable. Only an explicit "0 tries left" disables the start button.
+  const canPlayAgain = attemptsLeft === null || attemptsLeft > 0;
 
   return (
     <div className="container">

@@ -14,6 +14,7 @@ import {
   cartTotals,
   subscribeCart,
 } from '@/lib/cart';
+import type { TableDef } from '@/lib/tables';
 
 interface OrderMember {
   money: number;
@@ -26,6 +27,8 @@ interface OrderMenuProps {
   currencySymbol?: string;
   items: MenuItem[];
   member: OrderMember;
+  /** Set when the page was opened from a table's QR code (/menu?table=T3). */
+  table?: TableDef | null;
 }
 
 export default function OrderMenu({
@@ -34,6 +37,7 @@ export default function OrderMenu({
   currencySymbol = DEFAULT_CURRENCY_SYMBOL,
   items,
   member,
+  table = null,
 }: OrderMenuProps) {
   const [money, setMoney] = useState(member.money);
   const [sc, setSc] = useState(member.sc);
@@ -49,6 +53,17 @@ export default function OrderMenu({
       setSc(data.member.sc);
     }
   };
+
+  // Remember the scanned table so the cart also preselects it, even when the
+  // member taps the cart icon in the header instead of the cart bar.
+  useEffect(() => {
+    if (!table) return;
+    try {
+      window.sessionStorage.setItem('cafe:table', table.id);
+    } catch {
+      // Private mode can block storage; the cart bar still carries ?table=.
+    }
+  }, [table]);
 
   useEffect(() => {
     refreshBalance();
@@ -105,6 +120,16 @@ export default function OrderMenu({
           </div>
         </div>
       </div>
+
+      {table && (
+        <div className="table-banner">
+          <span className="table-banner-label">Dine-in</span>
+          <strong>Ordering for {table.label}</strong>
+          <span className="muted">
+            {table.capacity} seats · your table is attached at checkout.
+          </span>
+        </div>
+      )}
 
       <div className="filter-chips" role="tablist" aria-label="Menu categories">
         {['All', ...categories].map((cat) => (
@@ -185,7 +210,11 @@ export default function OrderMenu({
       )}
 
       {count > 0 && (
-        <Link href="/cart" className="cart-bar" aria-label={`View cart with ${count} items`}>
+        <Link
+          href={table ? `/cart?table=${table.id}` : '/cart'}
+          className="cart-bar"
+          aria-label={`View cart with ${count} items`}
+        >
           <span className="cart-bar-count">{count}</span>
           <span>View cart</span>
           <strong>{formatRupees(subtotal)}</strong>

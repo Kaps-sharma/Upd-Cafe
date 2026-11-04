@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthMember } from '@/lib/auth';
-import { placeOrder, InsufficientBalanceError, MenuItemError, getActiveMenuItems } from '@/lib/db';
+import {
+  placeOrder,
+  InsufficientBalanceError,
+  MenuItemError,
+  OrderError,
+  getActiveMenuItems,
+} from '@/lib/db';
+import { isOrderType, ORDER_TYPE_LABEL, type OrderType } from '@/lib/orders';
 
 export const runtime = 'nodejs';
 
@@ -15,6 +22,13 @@ export async function POST(req: NextRequest) {
   const items: { name: string; quantity: number }[] = [];
   const activeNames = new Set((await getActiveMenuItems()).map((item) => item.name));
   const scUsed = Number(body?.scUsed ?? 0);
+
+  // `body` is untyped JSON, so narrow into a local first — indexing a
+  // Record<OrderType, string> with an `any` is a noImplicitAny error.
+  const rawOrderType: unknown = body?.orderType;
+  const orderType: OrderType = isOrderType(rawOrderType) ? rawOrderType : 'dine_in';
+  const tableNumber = typeof body?.tableNumber === 'string' ? body.tableNumber.trim() : '';
+  const note = typeof body?.note === 'string' ? body.note.trim() : '';
 
   for (const raw of rawItems) {
     const name = typeof raw?.name === 'string' ? raw.name.trim() : '';
@@ -37,11 +51,30 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Your order is empty.' }, { status: 400 });
   }
 
+  if (note.length > 200) {
+    return NextResponse.json(
+      { error: 'Order note must be 200 characters or fewer.' },
+      { status: 400 }
+    );
+  }
+
   try {
-    const result = await placeOrder(member.id, items, scUsed);
-    return NextResponse.json({ ...result, balance: result.newSc });
+    const result = await placeOrder(member.id, items, scUsed, {
+      orderType,
+      tableNumber,
+      note,
+    });
+    return NextResponse.json({
+      ...result,
+      balance: result.newSc,
+      orderTypeLabel: ORDER_TYPE_LABEL[orderType],
+    });
   } catch (error) {
-    if (error instanceof InsufficientBalanceError || error instanceof MenuItemError) {
+    if (
+      error instanceof InsufficientBalanceError ||
+      error instanceof MenuItemError ||
+      error instanceof OrderError
+    ) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
     throw error;

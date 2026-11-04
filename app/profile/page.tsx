@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { requireMember } from '@/lib/auth';
-import { getStoreSettings } from '@/lib/db';
+import { getStoreSettings, getCoinTransactions } from '@/lib/db';
 import Header from '@/components/Header';
 import Profile from '@/components/Profile';
 
@@ -12,8 +12,9 @@ export const metadata: Metadata = {
 };
 
 export default async function ProfilePage() {
-  const member = await requireMember();
+  const member = await requireMember('/profile');
   const settings = await getStoreSettings();
+  const coins = await getCoinTransactions(member.id, 25);
 
   return (
     <main>
@@ -27,6 +28,7 @@ export default async function ProfilePage() {
         currencyName={settings.currencyName}
         currencySymbol={settings.currencySymbol}
         member={member}
+        coins={coins}
       />
     </main>
   );

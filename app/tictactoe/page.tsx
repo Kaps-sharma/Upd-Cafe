@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 };
 
 export default async function TicTacToePage() {
-  const member = await requireMember();
+  const member = await requireMember('/tictactoe');
   const settings = await getStoreSettings();
 
   return (

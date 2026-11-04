@@ -45,7 +45,7 @@ export async function POST(
   if (guess === session.secret) {
     await finishGameSession(session.id, 'won');
     const reward = randomGameReward();
-    const balance = await creditReward(member.id, reward);
+    const balance = await creditReward(member.id, reward, 'guess');
     const state = await recordGameOutcome(member.id, 'guess', true);
     return NextResponse.json({
       result: 'win',

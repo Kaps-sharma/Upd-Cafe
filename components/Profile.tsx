@@ -1,13 +1,24 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { formatCoins, formatRupees, DEFAULT_CURRENCY_SYMBOL } from '@/lib/store';
 import { BALANCE_CHANGED_EVENT } from '@/lib/events';
-import type { Invoice, BookingInvoice } from '@/lib/db';
+import type { BookingInvoice, CoinTransaction } from '@/lib/db';
+import {
+  ORDER_STATUS_LABEL,
+  ORDER_TYPE_LABEL,
+  isOrderClosed,
+  type Order,
+} from '@/lib/orders';
+import { TABLES } from '@/lib/tables';
 import PaymentModal from '@/components/PaymentModal';
+
+const TABLE_LABELS = new Map(TABLES.map((table) => [table.id, table.label]));
 
 interface ProfileMember {
   id: number;
+  username: string;
   name: string;
   sc: number;
   money: number;
@@ -20,9 +31,32 @@ interface ProfileProps {
   currencyName: string;
   currencySymbol?: string;
   member: ProfileMember;
+  coins: CoinTransaction[];
 }
 
 type Status = { type: 'success' | 'error'; text: string } | null;
+
+const GAME_LABELS: Record<string, string> = {
+  tictactoe: 'Tic Tac Toe',
+  guess: 'Guess the Number',
+  quiz: 'Quiz',
+};
+
+/** Human-readable label for one line of the coin ledger. */
+function coinDescription(tx: CoinTransaction): string {
+  switch (tx.reason) {
+    case 'game_win':
+      return GAME_LABELS[tx.ref] ? `Won at ${GAME_LABELS[tx.ref]}` : 'Won in a game';
+    case 'order_discount':
+      return tx.ref ? `Redeemed on order #${tx.ref}` : 'Redeemed on an order';
+    case 'welcome':
+      return 'Welcome bonus';
+    case 'admin_adjust':
+      return 'Adjusted by staff';
+    default:
+      return 'Coin adjustment';
+  }
+}
 
 function formatTimestamp(value: string): string {
   const date = new Date(value);
@@ -44,6 +78,7 @@ export default function Profile({
   currencyName,
   currencySymbol = DEFAULT_CURRENCY_SYMBOL,
   member: initialMember,
+  coins,
 }: ProfileProps) {
   const [member, setMember] = useState<ProfileMember>(initialMember);
   const [name, setName] = useState(initialMember.name);
@@ -52,18 +87,21 @@ export default function Profile({
   const [status, setStatus] = useState<Status>(null);
   const [saving, setSaving] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [loadingInvoices, setLoadingInvoices] = useState(true);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(true);
   const [bookings, setBookings] = useState<BookingInvoice[]>([]);
   const [loadingBookings, setLoadingBookings] = useState(true);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const loadInvoices = async () => {
-    const res = await fetch('/api/transactions', { cache: 'no-store' });
+  const loadOrders = async () => {
+    const res = await fetch('/api/orders', { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
-      setInvoices(data.invoices ?? []);
+      setOrders(data.orders ?? []);
     }
-    setLoadingInvoices(false);
+    setLoadingOrders(false);
   };
 
   const loadBookings = async () => {
@@ -76,7 +114,7 @@ export default function Profile({
   };
 
   useEffect(() => {
-    loadInvoices();
+    loadOrders();
     loadBookings();
     const handler = async () => {
       const res = await fetch('/api/me', { cache: 'no-store' });
@@ -88,6 +126,37 @@ export default function Profile({
     window.addEventListener(BALANCE_CHANGED_EVENT, handler);
     return () => window.removeEventListener(BALANCE_CHANGED_EVENT, handler);
   }, []);
+
+  const handleDelete = async () => {
+    setDeleteError(null);
+    if (!deletePassword) {
+      setDeleteError('Enter your password to confirm.');
+      return;
+    }
+    const ok = window.confirm(
+      'Delete your account? Your profile, orders, bookings, wallet and coin history will be removed permanently. This cannot be undone.'
+    );
+    if (!ok) return;
+
+    setDeleting(true);
+    try {
+      const res = await fetch('/api/profile', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: deletePassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setDeleteError(data.error ?? 'Could not delete your account.');
+        return;
+      }
+      window.location.href = '/';
+    } catch {
+      setDeleteError('Could not reach the server. Please try again.');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const handleSave = async () => {
     setStatus(null);
@@ -115,7 +184,7 @@ export default function Profile({
   };
 
   return (
-    <div className="container profile-page">
+    <div className="container">
       <div className="page-head-row">
         <div>
           <h1>Your profile</h1>
@@ -136,6 +205,8 @@ export default function Profile({
       <div className="profile-grid">
         <div className="card profile-card">
           <h2>Details</h2>
+          <label className="field-label">Member ID (used to log in)</label>
+          <input className="input" type="text" value={member.username} readOnly />
           <label className="field-label">Name</label>
           <input className="input" type="text" value={name} onChange={(e) => setName(e.target.value)} maxLength={40} />
           <label className="field-label">Phone (10 digits)</label>
@@ -167,24 +238,58 @@ export default function Profile({
               Add money
             </button>
           </div>
+
+          <h2 className="section-gap">Privacy &amp; data</h2>
+          <p className="muted">
+            Read the <Link href="/privacy">privacy policy</Link> to see what we store and why. You
+            can delete your account and all of its data here at any time.
+          </p>
+
+          <label className="field-label" htmlFor="delete-password">
+            Password
+          </label>
+          <input
+            id="delete-password"
+            className="input"
+            type="password"
+            value={deletePassword}
+            onChange={(e) => setDeletePassword(e.target.value)}
+            placeholder="Confirm with your password"
+            autoComplete="current-password"
+            maxLength={200}
+          />
+          {deleteError && <p className="status error">{deleteError}</p>}
+          <div className="actions">
+            <button className="btn btn-danger" onClick={handleDelete} disabled={deleting}>
+              {deleting ? 'Deleting...' : 'Delete my account & data'}
+            </button>
+          </div>
         </div>
 
         <div className="profile-stack">
           <div className="card profile-card">
             <h2>Orders</h2>
-            {loadingInvoices ? (
+            {loadingOrders ? (
               <p className="muted">Loading orders...</p>
-            ) : invoices.length === 0 ? (
+            ) : orders.length === 0 ? (
               <p className="muted">No orders yet. Browse the menu to order something.</p>
             ) : (
               <ul className="invoice-list">
-                {invoices.map((inv) => (
-                  <li key={inv.id} className="invoice-entry">
+                {orders.map((order) => (
+                  <li key={order.id} className="invoice-entry">
                     <div className="invoice-head-line">
-                      <strong>Order #{String(inv.id).padStart(4, '0')}</strong>
-                      <span className="muted">{formatTimestamp(inv.timestamp)}</span>
+                      <strong>Order {order.orderNo}</strong>
+                      <span className={`order-badge ${order.status}`}>
+                        {ORDER_STATUS_LABEL[order.status]}
+                      </span>
                     </div>
-                    {inv.items && inv.items.length > 0 ? (
+                    <p className="muted order-meta">
+                      {formatTimestamp(order.createdAt)} · {ORDER_TYPE_LABEL[order.orderType]}
+                      {order.tableNumber
+                        ? ` · ${TABLE_LABELS.get(order.tableNumber) ?? order.tableNumber}`
+                        : ''}
+                    </p>
+                    {order.items.length > 0 ? (
                       <div className="invoice-table">
                         <div className="invoice-row invoice-head">
                           <span>Item</span>
@@ -192,8 +297,8 @@ export default function Profile({
                           <span>Price</span>
                           <span>Amount</span>
                         </div>
-                        {inv.items.map((item) => (
-                          <div key={`${inv.id}-${item.name}`} className="invoice-row">
+                        {order.items.map((item, index) => (
+                          <div key={`${order.id}-${item.name}-${index}`} className="invoice-row">
                             <span>{item.name}</span>
                             <span>{item.quantity}</span>
                             <span>{formatRupees(item.price)}</span>
@@ -202,18 +307,49 @@ export default function Profile({
                         ))}
                       </div>
                     ) : (
-                      <p className="muted note">{inv.orderDetails}</p>
+                      <p className="muted note">No item detail saved for this order.</p>
                     )}
-                    {inv.scUsed > 0 && (
+                    {order.coinsUsed > 0 && (
                       <div className="invoice-line">
-                        <span>Snake Coins used</span>
-                        <span>{formatCoins(inv.scUsed, currencySymbol)}</span>
+                        <span>{currencyName} used</span>
+                        <span>{formatCoins(order.coinsUsed, currencySymbol)}</span>
                       </div>
                     )}
                     <div className="invoice-line">
-                      <span>Total paid</span>
-                      <strong>{formatRupees(inv.total)}</strong>
+                      <span>{order.status === 'cancelled' ? 'Refunded' : 'Total paid'}</span>
+                      <strong>{formatRupees(order.total)}</strong>
                     </div>
+                    <div className="actions actions-tight">
+                      <Link href={`/orders/${order.id}`} className="btn btn-sm">
+                        {isOrderClosed(order.status) ? 'View invoice' : 'Track order'}
+                      </Link>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="card profile-card">
+            <h2>{currencyName} history</h2>
+            <p className="muted">
+              Every coin earned and spent, newest first. Coins can pay for up to a set share of
+              each bill, so they always stretch your wallet further without making an order free.
+            </p>
+            {coins.length === 0 ? (
+              <p className="muted">No coin activity yet. Win a game to start earning.</p>
+            ) : (
+              <ul className="invoice-list">
+                {coins.map((tx) => (
+                  <li key={tx.id} className="invoice-entry">
+                    <div className="invoice-head-line">
+                      <strong>{coinDescription(tx)}</strong>
+                      <span className={tx.amount >= 0 ? 'status success' : 'status error'}>
+                        {tx.amount >= 0 ? '+' : ''}
+                        {formatCoins(tx.amount, currencySymbol)}
+                      </span>
+                    </div>
+                    <p className="muted order-meta">{formatTimestamp(tx.createdAt)}</p>
                   </li>
                 ))}
               </ul>
@@ -250,7 +386,13 @@ export default function Profile({
                     </div>
                     <div className="invoice-line">
                       <span>Status</span>
-                      <strong className="status success">Confirmed</strong>
+                      <strong className={b.status === 'cancelled' ? 'status error' : 'status success'}>
+                        {b.status === 'cancelled'
+                          ? 'Cancelled'
+                          : b.status === 'seated'
+                            ? 'Seated'
+                            : 'Confirmed'}
+                      </strong>
                     </div>
                   </li>
                 ))}

@@ -1,5 +1,6 @@
 export interface MemberPublic {
   id: number;
+  username: string; // member ID used to log in
   name: string;
   sc: number; // Snake Coins: earned from games, used as order discount
   money: number; // rupees (₹): used to pay for orders
@@ -13,6 +14,17 @@ export interface StoreSettings {
   currencyName: string;
   currencySymbol: string;
   welcomeBonus: number;
+  timezone: string;
+  /** Highest share of an order that loyalty coins may pay for. */
+  maxDiscountPercent: number;
+  /** GST rate printed on the invoice. Menu prices are treated as GST-inclusive. */
+  gstPercent: number;
+  /** FSSAI licence number printed on the invoice (optional). */
+  fssaiNumber: string;
+  /** GSTIN printed on the invoice (optional). */
+  gstin: string;
+  /** Extra line printed at the bottom of an invoice (optional). */
+  invoiceNote: string;
 }
 
 export interface MenuItem {

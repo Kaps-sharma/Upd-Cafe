@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import type { BookingInvoice } from '@/lib/db';
-import { TABLES, TIME_SLOTS, MAX_SEATS, MAX_BOOKING_DAYS } from '@/lib/tables';
+import { TABLES, TIME_SLOTS, MAX_SEATS } from '@/lib/tables';
+import { formatDateKey } from '@/lib/time';
 
 interface Availability {
   date: string;
@@ -15,27 +16,20 @@ interface Availability {
 interface TableBookingProps {
   storeName: string;
   member: { name: string };
+  today: string;
+  maxDate: string;
+  timeZone: string;
 }
 
-function localDateKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-function offsetKey(offset: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + offset);
-  return localDateKey(d);
-}
-
-function formatDate(dateStr: string): string {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const date = new Date(y, m - 1, d);
-  return date.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
-}
-
-export default function TableBooking({ storeName, member }: TableBookingProps) {
+export default function TableBooking({
+  storeName,
+  member,
+  today,
+  maxDate,
+  timeZone,
+}: TableBookingProps) {
   const [seats, setSeats] = useState(2);
-  const [date, setDate] = useState<string | null>(null);
+  const [date, setDate] = useState<string>(today);
   const [slot, setSlot] = useState<string>(TIME_SLOTS[0].id);
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
   const [availability, setAvailability] = useState<Availability | null>(null);
@@ -43,12 +37,7 @@ export default function TableBooking({ storeName, member }: TableBookingProps) {
   const [booking, setBooking] = useState<BookingInvoice | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const minDate = useMemo(() => offsetKey(0), []);
-  const maxDate = useMemo(() => offsetKey(MAX_BOOKING_DAYS), []);
-
-  useEffect(() => {
-    setDate(offsetKey(0));
-  }, []);
+  const minDate = today;
 
   useEffect(() => {
     if (!date) return;
@@ -80,6 +69,18 @@ export default function TableBooking({ storeName, member }: TableBookingProps) {
   const validSlots = availability?.slots ?? [];
   const activeSlot = validSlots.find((s) => s.id === slot);
   const bookedTables = availability?.booked[slot] ?? [];
+
+  // When the page opens (or the date changes) the first slot may already have
+  // passed. Move to the first slot that is still bookable instead of leaving a
+  // disabled chip selected.
+  useEffect(() => {
+    if (!availability) return;
+    const current = availability.slots.find((s) => s.id === slot);
+    if (current && !current.disabled) return;
+    const firstOpen = availability.slots.find((s) => !s.disabled);
+    setSlot(firstOpen?.id ?? '');
+    setSelectedTable(null);
+  }, [availability, slot]);
 
   const tableState = (id: string) => {
     const table = TABLES.find((t) => t.id === id)!;
@@ -142,7 +143,7 @@ export default function TableBooking({ storeName, member }: TableBookingProps) {
         <div className="card invoice-card">
           <h1>Table reserved</h1>
           <p className="subtitle">
-            {storeName} · Booking {booking.bookingNo} · {formatDate(booking.date)} · {booking.slotLabel}
+            {storeName} · Booking {booking.bookingNo} · {formatDateKey(booking.date)} · {booking.slotLabel}
           </p>
           <div className="invoice-table">
             <div className="invoice-row invoice-head">
@@ -152,7 +153,7 @@ export default function TableBooking({ storeName, member }: TableBookingProps) {
               <span></span>
             </div>
             <div className="invoice-row">
-              <span>Guest</span>
+              <span>Member</span>
               <span></span>
               <span></span>
               <span>{booking.memberName}</span>
@@ -173,7 +174,7 @@ export default function TableBooking({ storeName, member }: TableBookingProps) {
               <span>Date</span>
               <span></span>
               <span></span>
-              <span>{formatDate(booking.date)}</span>
+              <span>{formatDateKey(booking.date)}</span>
             </div>
             <div className="invoice-row">
               <span>Time</span>
@@ -209,11 +210,12 @@ export default function TableBooking({ storeName, member }: TableBookingProps) {
         <div>
           <h1>Book a table</h1>
           <p className="subtitle">
-            Pick the number of seats, a date and a time. Choose a free table from the floor plan.
+            Pick the number of seats, a date and a time. Choose a free table from the floor
+            plan. Times are shown in {timeZone}.
           </p>
         </div>
         <div className="balance-pill">
-          <span className="balance-pill-label">Guest</span>
+          <span className="balance-pill-label">Member</span>
           <strong className="balance-pill-inline">{member.name}</strong>
         </div>
       </div>
@@ -254,6 +256,7 @@ export default function TableBooking({ storeName, member }: TableBookingProps) {
             value={date}
             onChange={(e) => {
               setDate(e.target.value);
+              setAvailability(null);
               setSelectedTable(null);
               setStatus(null);
             }}
@@ -283,7 +286,7 @@ export default function TableBooking({ storeName, member }: TableBookingProps) {
       <div className="card booking-layout-card">
         <h2>Floor plan</h2>
         <p className="muted">
-          Showing tables for {formatDate(date)} · {activeSlot?.label ?? ''}. Greyed tables are
+          Showing tables for {formatDateKey(date)} · {activeSlot?.label ?? ''}. Greyed tables are
           either too small for {seats} {seats === 1 ? 'person' : 'people'} or already booked.
         </p>
 
@@ -330,14 +333,14 @@ export default function TableBooking({ storeName, member }: TableBookingProps) {
             </strong>
             <span className="muted">
               {selectedTable
-                ? `${formatDate(date)} · ${activeSlot?.label ?? ''}`
+                ? `${formatDateKey(date)} · ${activeSlot?.label ?? ''}`
                 : 'Tap a free table on the plan above.'}
             </span>
           </div>
           <button
             className="btn btn-primary"
             onClick={reserve}
-            disabled={!selectedTable || busy}
+            disabled={!selectedTable || !activeSlot || busy}
           >
             {busy ? 'Booking...' : 'Reserve table'}
           </button>

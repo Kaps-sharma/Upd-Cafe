@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Offline · CafeSuite</title>
+    <style>
+      :root { color-scheme: light; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #f3efe6;
+        color: #1c2b24;
+        font-family: Georgia, 'Times New Roman', serif;
+        text-align: center;
+        padding: 2rem;
+      }
+      h1 { font-size: clamp(1.6rem, 4vw, 2.4rem); margin: 0 0 0.6rem; }
+      p { max-width: 34ch; margin: 0 auto 1.4rem; line-height: 1.6; }
+      a {
+        display: inline-block;
+        padding: 0.75rem 1.2rem;
+        border-radius: 999px;
+        background: #1c2b24;
+        color: #f3efe6;
+        text-decoration: none;
+        font-family: system-ui, sans-serif;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>You’re offline</h1>
+      <p>
+        The menu and your account need a connection. Reconnect and refresh to continue your
+        order — nothing in your cart has been lost.
+      </p>
+      <a href="/">Try again</a>
+    </main>
+  </body>
+</html>

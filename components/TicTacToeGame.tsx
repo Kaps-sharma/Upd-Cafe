@@ -1,19 +1,33 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { checkWin, botMove } from '@/lib/games';
 import { emitBalanceChanged } from '@/lib/events';
 import { DEFAULT_CURRENCY_SYMBOL } from '@/lib/store';
 
 type Cell = 'X' | 'O' | ' ';
 type Outcome = 'playing' | 'player-win' | 'bot-win' | 'draw';
 
+interface MoveResponse {
+  board: string;
+  result: 'active' | 'win' | 'lose' | 'draw';
+  reward?: number;
+  attemptsLeft?: number;
+  error?: string;
+}
+
 interface TicTacToeGameProps {
   currencySymbol?: string;
 }
 
+function attemptsNote(attemptsLeft?: number) {
+  if (typeof attemptsLeft !== 'number') return '';
+  return attemptsLeft > 0
+    ? ` ${attemptsLeft} game${attemptsLeft === 1 ? '' : 's'} left today.`
+    : ' You are out of games for today.';
+}
+
 export default function TicTacToeGame({ currencySymbol = DEFAULT_CURRENCY_SYMBOL }: TicTacToeGameProps) {
-  const [board, setBoard] = useState<Cell[]>(Array(9).fill(' '));
+  const [board, setBoard] = useState<Cell[]>(Array(9).fill(' ') as Cell[]);
   const [message, setMessage] = useState('');
   const [outcome, setOutcome] = useState<Outcome>('playing');
   const [error, setError] = useState<string | null>(null);
@@ -36,75 +50,55 @@ export default function TicTacToeGame({ currencySymbol = DEFAULT_CURRENCY_SYMBOL
     refreshState();
   }, []);
 
-  const claimOutcome = async (finalBoard: Cell[], outcome: 'win' | 'lose' | 'draw') => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch('/api/tictactoe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ board: finalBoard, outcome }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Something went wrong.');
-      setAttemptsLeft(typeof data.attemptsLeft === 'number' ? data.attemptsLeft : null);
-      if (data.reward > 0) {
-        emitBalanceChanged();
-        setMessage(`Congratulations! You win and earn ${data.reward} ${currencySymbol}.`);
-      } else if (outcome === 'lose') {
-        setMessage(`Bot wins! Better luck next time.${data.attemptsLeft > 0 ? ` ${data.attemptsLeft} game${data.attemptsLeft === 1 ? '' : 's'} left today.` : ' You are out of games for today.'}`);
-      } else {
-        setMessage(`Draw! Nobody wins.${data.attemptsLeft > 0 ? ` ${data.attemptsLeft} game${data.attemptsLeft === 1 ? '' : 's'} left today.` : ' You are out of games for today.'}`);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const reset = () => {
-    setBoard(Array(9).fill(' '));
+    setBoard(Array(9).fill(' ') as Cell[]);
     setMessage('');
     setOutcome('playing');
     setError(null);
     refreshState();
   };
 
-  const handleCell = (index: number) => {
+  /** The server owns the board: we only send the square, it answers with the move. */
+  const handleCell = async (index: number) => {
     if (outcome !== 'playing' || busy || attemptsLeft === 0) return;
     if (board[index] !== ' ') return;
 
-    const next = [...board];
-    next[index] = 'X';
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/tictactoe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cell: index }),
+      });
+      const data = (await res.json()) as MoveResponse;
+      if (!res.ok) throw new Error(data.error ?? 'Something went wrong.');
 
-    if (checkWin(next, 'X')) {
-      setBoard(next);
-      setOutcome('player-win');
-      claimOutcome(next, 'win');
-      return;
+      setBoard(data.board.split('') as Cell[]);
+
+      if (data.result === 'active') return;
+
+      if (data.result === 'win') {
+        setOutcome('player-win');
+        emitBalanceChanged();
+        setMessage(
+          data.reward && data.reward > 0
+            ? `Congratulations! You win and earn ${data.reward} ${currencySymbol}.`
+            : 'Congratulations! You win.'
+        );
+      } else if (data.result === 'lose') {
+        setOutcome('bot-win');
+        setMessage(`Bot wins! Better luck next time.${attemptsNote(data.attemptsLeft)}`);
+      } else {
+        setOutcome('draw');
+        setMessage(`Draw! Nobody wins.${attemptsNote(data.attemptsLeft)}`);
+      }
+      setAttemptsLeft(typeof data.attemptsLeft === 'number' ? data.attemptsLeft : null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong.');
+    } finally {
+      setBusy(false);
     }
-
-    const botIndex = botMove(next);
-    if (botIndex != null) {
-      next[botIndex] = 'O';
-    }
-
-    if (checkWin(next, 'O')) {
-      setBoard(next);
-      setOutcome('bot-win');
-      claimOutcome(next, 'lose');
-      return;
-    }
-
-    if (!next.includes(' ')) {
-      setBoard(next);
-      setOutcome('draw');
-      claimOutcome(next, 'draw');
-      return;
-    }
-
-    setBoard(next);
   };
 
   const canPlayAgain = attemptsLeft !== null && attemptsLeft > 0;

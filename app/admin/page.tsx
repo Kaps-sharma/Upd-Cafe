@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { isAdminSession } from '@/lib/auth';
-import { getStoreSettings, listMenuItems } from '@/lib/db';
+import { getStoreSettings, listMenuItems, getOpenOrders, getRecentClosedOrders } from '@/lib/db';
 import AdminPanel from '@/components/AdminPanel';
 import AdminShell from '@/components/AdminShell';
 
@@ -20,11 +20,20 @@ export default async function AdminPage() {
 
   const settings = await getStoreSettings();
   const items = await listMenuItems();
+  const [openOrders, closedOrders] = await Promise.all([
+    getOpenOrders(),
+    getRecentClosedOrders(),
+  ]);
 
   return (
     <main>
       <AdminShell storeName={settings.storeName} />
-      <AdminPanel initialSettings={settings} initialItems={items} />
+      <AdminPanel
+        initialSettings={settings}
+        initialItems={items}
+        initialOpenOrders={openOrders}
+        initialClosedOrders={closedOrders}
+      />
     </main>
   );
 }

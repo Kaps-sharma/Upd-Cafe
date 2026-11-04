@@ -1,3 +1,9 @@
+# Required env vars (set in Netlify -> Site settings -> Environment variables):
+#   DATABASE_URL                  Supabase session-pooler URI (port 5432)
+#   SNAKE_CAFE_SECRET             long random string for signing session cookies
+#   SNAKE_CAFE_ADMIN_PASSCODE     passcode for /admin (do not leave the default)
+#   NEXT_PUBLIC_SITE_URL          public https URL, used in table QR codes
+# See .env.example for how to get each value.
 [functions]
 node_bundler = "esbuild"
 external_node_modules = ["pg"]

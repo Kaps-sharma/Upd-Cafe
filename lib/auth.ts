@@ -1,14 +1,23 @@
 import 'server-only';
 import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { MemberPublic } from '@/lib/store';
-import { getMember, findMemberByName, createMember, getStoreSettings } from '@/lib/db';
+import { getMember } from '@/lib/db';
 
 const SESSION_COOKIE = 'snake_session';
 const ADMIN_COOKIE = 'snake_admin';
-const SECRET = process.env.SNAKE_CAFE_SECRET ?? 'snake-cafe-dev-secret-change-me';
+const DEV_SECRET = 'snake-cafe-dev-secret-change-me';
+const SECRET =
+  process.env.SNAKE_CAFE_SECRET?.trim() ||
+  (process.env.NODE_ENV === 'production' ? '' : DEV_SECRET);
 
 function sign(payload: string): string {
+  if (!SECRET) {
+    throw new Error(
+      'SNAKE_CAFE_SECRET is not set. Add a long random string to .env.local before signing in.'
+    );
+  }
   return createHmac('sha256', SECRET).update(payload).digest('hex');
 }
 
@@ -43,6 +52,7 @@ export async function setSession(memberId: number): Promise<void> {
   store.set(SESSION_COOKIE, `${memberId}.${sign(String(memberId))}`, {
     httpOnly: true,
     sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
     path: '/',
     maxAge: 60 * 60 * 24 * 7,
   });
@@ -53,30 +63,29 @@ export async function clearSession(): Promise<void> {
   store.delete(SESSION_COOKIE);
 }
 
-const GUEST_NAME = 'Guest';
-
-// Login is optional during demo mode: requests always resolve to a member.
-// A signed-in session uses that member; otherwise a shared "Guest" member is
-// used automatically so every page and API works without an account.
-async function resolveMember(id: number | null): Promise<MemberPublic> {
-  if (id != null) {
-    const member = await getMember(id);
-    if (member) return member;
-  }
-  let guest = await findMemberByName(GUEST_NAME);
-  if (!guest) {
-    const settings = await getStoreSettings();
-    guest = await createMember(GUEST_NAME, settings.welcomeBonus);
-  }
-  return guest;
-}
-
-export async function requireMember(): Promise<MemberPublic> {
-  return resolveMember(await getMemberId());
-}
-
+/** The signed-in member, or null when nobody is logged in. */
 export async function getAuthMember(): Promise<MemberPublic | null> {
-  return resolveMember(await getMemberId());
+  const id = await getMemberId();
+  if (id == null) return null;
+  return getMember(id);
+}
+
+export async function isSignedIn(): Promise<boolean> {
+  return (await getAuthMember()) !== null;
+}
+
+/**
+ * Server-component guard. Sends visitors to the login page and brings them
+ * back to `nextPath` after a successful login.
+ */
+export async function requireMember(nextPath?: string): Promise<MemberPublic> {
+  const member = await getAuthMember();
+  if (member) return member;
+  const target =
+    nextPath && nextPath.startsWith('/') && !nextPath.startsWith('//')
+      ? `/login?next=${encodeURIComponent(nextPath)}`
+      : '/login';
+  redirect(target);
 }
 
 export async function setAdminSession(): Promise<void> {
@@ -84,6 +93,7 @@ export async function setAdminSession(): Promise<void> {
   store.set(ADMIN_COOKIE, `admin.${sign('admin')}`, {
     httpOnly: true,
     sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
     path: '/',
     maxAge: 60 * 60 * 24,
   });

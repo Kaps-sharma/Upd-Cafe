@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
   let balance: number | null = null;
   if (passed) {
     reward = randomGameReward();
-    balance = await creditReward(member.id, reward);
+    balance = await creditReward(member.id, reward, 'quiz');
   }
 
   return NextResponse.json({

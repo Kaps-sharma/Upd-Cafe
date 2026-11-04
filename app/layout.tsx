@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { Playfair_Display, Inter, IBM_Plex_Mono } from 'next/font/google';
+import PwaRegister from '@/components/PwaRegister';
 import './globals.css';
 
 const playfair = Playfair_Display({
@@ -30,6 +31,20 @@ export const viewport: Viewport = {
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
+  manifest: '/manifest.webmanifest',
+  applicationName: 'CafeSuite',
+  icons: {
+    icon: [
+      { url: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+      { url: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+    ],
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+  },
+  appleWebApp: {
+    capable: true,
+    title: 'CafeSuite',
+    statusBarStyle: 'default',
+  },
   title: {
     default: 'Snake Cafe',
     template: '%s | Snake Cafe',
@@ -81,7 +96,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }}
         />
       </head>
-      <body>{children}</body>
+      <body>
+        {children}
+        <PwaRegister />
+      </body>
     </html>
   );
 }

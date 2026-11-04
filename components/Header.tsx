@@ -18,6 +18,7 @@ interface HeaderProps {
   currencyName?: string;
   currencySymbol?: string;
   member?: HeaderMember | null;
+  signedIn?: boolean;
 }
 
 const SHOW_CART_PAGES = ['/menu', '/cart'];
@@ -26,6 +27,7 @@ export default function Header({
   storeName,
   currencySymbol = DEFAULT_CURRENCY_SYMBOL,
   member,
+  signedIn = true,
 }: HeaderProps) {
   const [money, setMoney] = useState(member?.money ?? 0);
   const [sc, setSc] = useState(member?.sc ?? 0);
@@ -36,7 +38,8 @@ export default function Header({
   const pathname = usePathname();
 
   const homeHref = '/';
-  const showCart = !!member && SHOW_CART_PAGES.includes(pathname);
+  const showSignedIn = !!member && signedIn;
+  const showCart = showSignedIn && SHOW_CART_PAGES.includes(pathname);
 
   const refreshBalance = async () => {
     if (!member) return;
@@ -121,7 +124,7 @@ export default function Header({
           </Link>
         </nav>
         <div className="header-user">
-          {member ? (
+          {showSignedIn ? (
             <>
               {showCart && (
                 <Link href="/cart" className="cart-chips" aria-label={`Cart with ${cartCount} items`}>

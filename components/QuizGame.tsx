@@ -34,19 +34,29 @@ export default function QuizGame({ currencySymbol = DEFAULT_CURRENCY_SYMBOL }: Q
   const [attemptsLeft, setAttemptsLeft] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  const loadQuestions = async () => {
+    setError(null);
+    setResult(null);
+    setQuestions(null);
+    setAnswers([]);
+    try {
+      const res = await fetch('/api/quiz', { cache: 'no-store' });
+      const data = await res.json();
+      if (Array.isArray(data.questions)) {
+        setQuestions(data.questions);
+        setAnswers(new Array<number>(data.questions.length).fill(-1));
+        setAttemptsLeft(data.attemptsLeft);
+      } else {
+        setError(data.error ?? 'Could not load the quiz.');
+      }
+    } catch {
+      setError('Could not load the quiz.');
+    }
+  };
+
   useEffect(() => {
-    fetch('/api/quiz', { cache: 'no-store' })
-      .then(async (res) => {
-        const data = await res.json();
-        if (Array.isArray(data.questions)) {
-          setQuestions(data.questions);
-          setAnswers(new Array<number>(data.questions.length).fill(-1));
-          setAttemptsLeft(data.attemptsLeft);
-        } else {
-          setError(data.error ?? 'Could not load the quiz.');
-        }
-      })
-      .catch(() => setError('Could not load the quiz.'));
+    loadQuestions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (error && !questions) {
@@ -133,7 +143,7 @@ export default function QuizGame({ currencySymbol = DEFAULT_CURRENCY_SYMBOL }: Q
             </>
           )}
           {canRetry && (
-            <button className="btn" onClick={() => setResult(null)}>
+            <button className="btn" onClick={loadQuestions}>
               Try again
             </button>
           )}
