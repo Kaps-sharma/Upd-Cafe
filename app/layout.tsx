@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import { Playfair_Display, Inter, IBM_Plex_Mono } from 'next/font/google';
 import PwaRegister from '@/components/PwaRegister';
+import { getSiteUrl } from '@/lib/site';
 import './globals.css';
 
 const playfair = Playfair_Display({
@@ -30,7 +31,7 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
+  metadataBase: new URL(getSiteUrl()),
   manifest: '/manifest.webmanifest',
   applicationName: 'CafeSuite',
   icons: {
